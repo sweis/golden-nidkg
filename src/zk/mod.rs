@@ -36,7 +36,7 @@
 //!
 //! * [`generators`]   — the Pedersen generator vectors (`G`, `H`, `B`, `B_b`).
 //! * [`r1cs`]         — constraint system (multiplication gates + linear
-//!                       constraints on `a_L, a_R, a_O, v`).
+//!   constraints on `a_L, a_R, a_O, v`).
 //! * [`ipa`]          — log-size inner-product argument.
 //! * [`bp_r1cs`]      — Bulletproofs R1CS prover/verifier.
 //! * [`gadgets`]      — bit decomposition + Jubjub fixed/variable-base MSM.

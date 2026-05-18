@@ -472,7 +472,7 @@ mod tests {
         let mut rng = ark_std::test_rng();
         let gens = BpGens::new(64);
         let base = GinAffine::generator();
-        let bits_w = vec![false; 8];
+        let bits_w = [false; 8];
         let expected = GinAffine::zero(); // identity
 
         let mut prover = Prover::new(&gens, Transcript::new(b"test"));

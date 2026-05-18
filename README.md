@@ -1,0 +1,96 @@
+# golden-nidkg
+
+A reference implementation of **Golden: Lightweight Non-Interactive Distributed
+Key Generation** (Bünz, Choi, Komlo — [ePrint 2025/1924](https://eprint.iacr.org/2025/1924)).
+
+Golden is a one-round (broadcast) DKG that outputs Shamir secret shares of a
+field element `sk ∈ Z_p` and a public key `PK = g^sk` to `n` participants with
+threshold `t`.  Public verifiability is achieved without ElGamal/Paillier/class-
+group encryption — each pairwise Shamir share is encrypted with a one-time pad
+derived from a Diffie-Hellman shared secret via a *two-party exponent VRF*, and
+a Bulletproofs proof binds the pad to its commitment so any third party can
+verify every dealing.
+
+> ⚠️ **Reference implementation only.**  Side-channel resistance, constant-time
+> hash-to-curve, and a third-party audit are out of scope.  Do not deploy.
+
+## Quick start
+
+```sh
+cargo run --release --example demo                 # 5-of-3 with full ZK proofs
+cargo run --release --example demo -- 7 4          # custom n, t
+cargo run --release --example demo -- 5 3 quick    # protocol-only, no real ZK
+cargo test --release                               # all tests except slow ZK
+cargo test --release -- --ignored                  # full-ZK round-trips (~60s)
+```
+
+## What the demo does
+
+1. **PKI registration** — each party generates a Jubjub keypair `(sk_i^I, PK_i^I)`
+   and registers it with a Schnorr proof of knowledge bound to its identity.
+2. **Round 0** — each party builds a degree-`(t-1)` Shamir polynomial,
+   Feldman-commits it, encrypts every peer's share with an eVRF pad, and
+   broadcasts `(msg_i, C_i, {(R_{ij}, z_{ij}, π_{ij})})`.
+3. **Public verification** — anyone re-derives each `X_{jk} = g^{f_j(k)}` from
+   the Feldman commitment and checks `g^{z_{jk}} = R_{jk} · X_{jk}` and the
+   Bulletproofs proof that `R_{jk}` is the right pad commitment.
+4. **Round 1** — each party re-derives its own pads, decrypts and aggregates
+   `sk_i = Σ_j x_{ji}`, derives `PK = ∏_j A_{j,0}` and `PK_l = ∏_j X_{jl}`.
+5. **Threshold reconstruction** — the demo recovers `sk` from `t` shares,
+   checks `g^sk = PK`, and that `t-1` shares cannot.
+6. **Proactive refresh** — re-runs with `ω_i = 0`; shares rotate, `sk` and `PK`
+   are preserved.
+
+## Layout
+
+| Path                       | Contents |
+|----------------------------|----------|
+| `src/curves.rs`            | Jubjub (`G_in`) over BLS12-381 G1 (`G_out`) type aliases. |
+| `src/shamir.rs`            | Shamir share/recover, Lagrange interpolation. |
+| `src/vss.rs`               | Feldman VSS commit + share-commitment derivation. |
+| `src/schnorr.rs`           | Schnorr PoK over `G_in` for PKI registration (rogue-key safe). |
+| `src/hash_to_curve.rs`     | Try-and-increment hash-to-Jubjub. |
+| `src/evrf.rs`              | Two-party exponent VRF (DH pad derivation + LHL). |
+| `src/zk/`                  | Bulletproofs R1CS over BLS12-381 G1 + the `R_eVRF` circuit. |
+| `src/dkg.rs`               | Round 0 / verify / Round 1. |
+| `examples/demo.rs`         | End-to-end demo (above). |
+| `tests/dkg.rs`             | Protocol & adversarial integration tests. |
+| `tests/zk_full.rs`         | Full-ZK round-trips (`--ignored`). |
+| `BUGS.md`                  | Issues found in the paper. |
+| `CLAUDE.md`                | Project notes for future sessions. |
+
+## Why a hand-rolled Bulletproofs R1CS?
+
+Golden's `R_eVRF` circuit lives over `F_p` = the BLS12-381 scalar field
+(= Jubjub's base field), so the Bulletproofs proof must commit over BLS12-381
+`G1`.  No published Rust Bulletproofs library does this:
+
+* `bulletproofs` (dalek) — Ristretto only; the 5.x R1CS module is also broken.
+* `bulletproofs-bls` (zkcrypto) — targets BLS12-381, but its `yoloproofs`
+  (R1CS) feature does not compile against any `blstrs_plus`/`bls12_381_plus`
+  version.
+* `ark-bulletproofs` — secq256k1/Zorro.
+
+`src/zk/{ipa,r1cs,bp_r1cs}.rs` is a ~600-line port of the dalek `yoloproofs`
+design (Bulletproofs §5 / BCC+16) to arkworks.  It is unit-tested against
+tampered witnesses, and the `R_eVRF` circuit test verifies a full 255-bit proof
+round-trip and rejects a tampered `R`.
+
+## Performance (single core, x86-64, `--release`)
+
+| Operation              | n=3, t=2 | Notes |
+|------------------------|----------|-------|
+| ZK CRS setup           | ~5 s     | Hash-to-G1 for 16 k generators; one-time. |
+| Dealing (Round 0)      | ~17 s    | 2 eVRF proofs of ~5.6 k mul gates each. |
+| Verify one dealing     | ~1 s     | Single MSM. |
+| Round 1                | <1 ms    | |
+
+The current implementation produces one eVRF proof per `(dealer, recipient)`
+pair (the unbatched protocol from §5.2).  The paper's §5.3 optimisation batches
+all `n-1` evaluations into a single proof per dealer, sharing the dealer's `sk`
+bit decomposition and `g_in^{sk}` gadget; this would roughly halve communication
+and verification time for `n ≥ 5`.  See `CLAUDE.md` for the TODO.
+
+## License
+
+MIT OR Apache-2.0.

@@ -116,7 +116,7 @@ pub fn recover(t: u32, shares: &[(u32, Fp)]) -> GoldenResult<Fp> {
         if sorted.len() != idx.len() {
             return Err(GoldenError::DuplicateShareIndex);
         }
-        if sorted.iter().any(|&i| i == 0) {
+        if sorted.contains(&0) {
             return Err(GoldenError::InvalidShareIndex);
         }
     }

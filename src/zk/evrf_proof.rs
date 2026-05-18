@@ -83,6 +83,7 @@ impl ZkParams {
 
 /// The proof object carried in a [`crate::dkg::Dealing`].
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // `Full` carries ≈40 group elements; the box would only obscure things.
 pub enum EvrfProof {
     Full(R1CSProof),
     InsecureQuick(SchnorrR),

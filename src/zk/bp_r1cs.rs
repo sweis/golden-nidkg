@@ -54,7 +54,7 @@ fn msm(bases: &[GoutAffine], scalars: &[Fp]) -> GoutProj {
     GoutProj::msm(bases, scalars).expect("msm")
 }
 
-/// ─── Prover ─────────────────────────────────────────────────────────────────
+// ─── Prover ─────────────────────────────────────────────────────────────────
 
 pub struct Prover<'g> {
     gens: &'g BpGens,
@@ -304,7 +304,7 @@ impl ConstraintSystem for Prover<'_> {
     }
 }
 
-/// ─── Verifier ───────────────────────────────────────────────────────────────
+// ─── Verifier ───────────────────────────────────────────────────────────────
 
 pub struct Verifier<'g> {
     gens: &'g BpGens,
@@ -508,7 +508,7 @@ impl ConstraintSystem for Verifier<'_> {
     }
 }
 
-/// ─── Polynomials over `F_p^n` ───────────────────────────────────────────────
+// ─── Polynomials over `F_p^n` ───────────────────────────────────────────────
 
 /// Vector polynomial of degree 3: `p(x) = t0 + t1 x + t2 x² + t3 x³`, each
 /// coefficient an `F_p^n` vector.

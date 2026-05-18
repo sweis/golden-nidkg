@@ -170,7 +170,7 @@ mod tests {
         let lambda = 16;
         let cap = gens_capacity(lambda);
         let gens = BpGens::new(cap);
-        let mut rng = ark_std::test_rng();
+        let rng = ark_std::test_rng();
         let (pubs, wit) = small_lambda_test_setup(lambda);
         // The k value is ~255 bits, which won't fit in lambda=16 bits.
         // So this test would fail in general.  Instead test with a tiny

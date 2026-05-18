@@ -52,16 +52,21 @@ impl InnerProductProof {
         assert_eq!(h_factors.len(), n);
 
         // Apply factors to bases up front (this folds `y^{-i}` into `H_i`).
-        let mut g: Vec<GoutProj> = g_vec
-            .iter()
-            .zip(g_factors)
-            .map(|(p, s)| GoutProj::from(*p) * s)
-            .collect();
-        let mut h: Vec<GoutProj> = h_vec
-            .iter()
-            .zip(h_factors)
-            .map(|(p, s)| GoutProj::from(*p) * s)
-            .collect();
+        // Skip the (group) scalar mult when the factor is trivially 1 — the
+        // R1CS protocol always passes `g_factors = 1ⁿ`.
+        let apply = |bases: &[GoutAffine], factors: &[Fp]| -> Vec<GoutProj> {
+            if factors.iter().all(|f| f.is_one()) {
+                bases.iter().map(|p| GoutProj::from(*p)).collect()
+            } else {
+                bases
+                    .iter()
+                    .zip(factors)
+                    .map(|(p, s)| GoutProj::from(*p) * s)
+                    .collect()
+            }
+        };
+        let mut g = apply(g_vec, g_factors);
+        let mut h = apply(h_vec, h_factors);
         let mut a = a_vec.to_vec();
         let mut b = b_vec.to_vec();
         let q_proj = GoutProj::from(*q);
@@ -125,6 +130,7 @@ impl InnerProductProof {
     /// Compute the verification scalars `(u_i², u_i^{-2}, s_j)` for a proof
     /// with `n = 2^k` length.  `s_j = ∏ u_{b(j,i)}^{±1}` is the product of
     /// challenge factors for index `j`.
+    #[allow(clippy::type_complexity)]
     pub fn verification_scalars(
         &self,
         n: usize,

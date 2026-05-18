@@ -1,0 +1,35 @@
+[package]
+name = "golden-nidkg"
+version = "0.1.0"
+edition = "2021"
+description = "Reference implementation of the Golden non-interactive DKG (ePrint 2025/1924)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+ark-bls12-381        = "0.5"
+ark-ed-on-bls12-381  = "0.5"
+ark-ec               = "0.5"
+ark-ff               = "0.5"
+ark-std              = "0.5"
+ark-serialize        = { version = "0.5", features = ["derive"] }
+merlin               = "3.0"
+rand                 = "0.8"
+rand_chacha          = "0.3"
+sha2                 = "0.10"
+zeroize              = { version = "1", features = ["derive"] }
+thiserror            = "1"
+rayon                = { version = "1", optional = true }
+
+[dev-dependencies]
+hex                  = "0.4"
+
+[features]
+default = []
+parallel = ["rayon", "ark-ec/parallel", "ark-ff/parallel", "ark-std/parallel"]
+
+[[example]]
+name = "demo"
+
+[profile.release]
+opt-level = 3
+lto = true

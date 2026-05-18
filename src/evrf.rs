@@ -23,7 +23,6 @@
 use crate::curves::{fp_to_fs, gout_mul, x_coord, Fp, Fs, GinAffine, GinProj, GoutAffine};
 use crate::hash_to_curve::{h1, h2, hash_to_fp};
 use ark_ec::CurveGroup;
-use ark_ff::Zero;
 
 /// A session/CRS identifier.  Mixed into the eVRF hashes and the proof
 /// transcript so cross-session replay is impossible (BUGS.md §5).
@@ -102,9 +101,13 @@ pub fn eval_pad(
 ) -> (PadOutput, EvrfWitness) {
     // S = PK'^{sk}
     let s = (GinProj::from(*pk_other) * sk).into_affine();
-    debug_assert!(
-        !s.x.is_zero() || !s.y.is_zero(),
-        "PKI must reject identity keys"
+    // The DH shared secret is the identity iff `pk_other` is the identity
+    // (which the PKI rejects) or `sk = 0` (which `RegisteredKey::fresh`
+    // never produces).  The eVRF is degenerate at the identity (x = 0 ⇒ pad
+    // = 0), so we hard-fail rather than silently produce a known pad.
+    assert!(
+        !ark_ec::AffineRepr::is_zero(&s),
+        "DH shared secret is the identity — PKI must reject identity keys"
     );
     // k = int(S.x) reduced mod s
     let k0 = x_coord(&s);

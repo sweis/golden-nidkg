@@ -168,11 +168,10 @@ pub fn prove_evrf_batch(
         }
         ZkMode::Full => {
             if pubs.peers.len() > params.max_peers {
-                return Err(GoldenError::Proof(format!(
-                    "{} peers > max_peers {}",
-                    pubs.peers.len(),
-                    params.max_peers
-                )));
+                return Err(GoldenError::TooManyPeers {
+                    got: pubs.peers.len(),
+                    max: params.max_peers,
+                });
             }
             let t = batch_transcript(sid, pubs);
             let mut prover = Prover::new(&params.gens, t);
@@ -231,11 +230,10 @@ pub fn verify_evrf_batch(
         }
         (ZkMode::Full, EvrfProof::Full(p)) => {
             if pubs.peers.len() > params.max_peers {
-                return Err(GoldenError::Proof(format!(
-                    "{} peers > max_peers {}",
-                    pubs.peers.len(),
-                    params.max_peers
-                )));
+                return Err(GoldenError::TooManyPeers {
+                    got: pubs.peers.len(),
+                    max: params.max_peers,
+                });
             }
             let t = batch_transcript(sid, pubs);
             let mut verifier = Verifier::new(&params.gens, t);

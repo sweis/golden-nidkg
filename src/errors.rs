@@ -53,6 +53,12 @@ pub enum GoldenError {
     #[error("refresh dealing from dealer {dealer} commits to a non-zero secret")]
     NonZeroRefreshSecret { dealer: u32 },
 
+    #[error("party {id} is not registered in the PKI snapshot")]
+    PartyNotInPki { id: u32 },
+
+    #[error("dealing has {got} recipients but the ZK CRS supports at most {max}")]
+    TooManyPeers { got: usize, max: usize },
+
     #[error("Bulletproofs proof error: {0}")]
     Proof(String),
 

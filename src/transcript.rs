@@ -14,7 +14,6 @@ pub trait TranscriptExt {
     fn append_gout(&mut self, label: &'static [u8], v: &GoutAffine);
     fn challenge_fp(&mut self, label: &'static [u8]) -> Fp;
     fn challenge_fs(&mut self, label: &'static [u8]) -> Fs;
-    fn challenge_fps(&mut self, label: &'static [u8], n: usize) -> Vec<Fp>;
 }
 
 fn ser<T: CanonicalSerialize>(v: &T) -> Vec<u8> {
@@ -51,15 +50,5 @@ impl TranscriptExt for Transcript {
         let mut buf = [0u8; 64];
         self.challenge_bytes(label, &mut buf);
         Fs::from_le_bytes_mod_order(&buf)
-    }
-    fn challenge_fps(&mut self, label: &'static [u8], n: usize) -> Vec<Fp> {
-        // 64-byte chunks are independent enough; advance the transcript once
-        // and squeeze.
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n as u64 {
-            self.append_u64(b"index", i);
-            out.push(self.challenge_fp(label));
-        }
-        out
     }
 }

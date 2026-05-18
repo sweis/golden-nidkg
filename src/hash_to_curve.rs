@@ -8,11 +8,9 @@
 //! constraint system; `H₁(msg)` and `H₂(msg)` are *public inputs*, so the
 //! circuit only does fixed-base scalar multiplication by these public points.
 
-use crate::curves::{Fp, GinAffine, GinProj};
+use crate::curves::{Fp, GinAffine};
 use ark_ec::twisted_edwards::TECurveConfig;
-#[allow(unused_imports)]
-use ark_ec::AffineRepr; // used in `is_zero()` and `is_on_curve()` only when debug_assertions
-use ark_ec::{AdditiveGroup, CurveConfig, CurveGroup};
+use ark_ec::AffineRepr;
 use ark_ed_on_bls12_381::JubjubConfig;
 use ark_ff::{Field, PrimeField};
 use sha2::{Digest, Sha512};
@@ -22,7 +20,6 @@ use sha2::{Digest, Sha512};
 pub fn hash_to_gin(domain: &[u8], msg: &[u8]) -> GinAffine {
     let a = JubjubConfig::COEFF_A;
     let d = JubjubConfig::COEFF_D;
-    let cofactor = <JubjubConfig as CurveConfig>::COFACTOR; // [8]
     let mut ctr: u32 = 0;
     loop {
         let mut h = Sha512::new();
@@ -44,12 +41,7 @@ pub fn hash_to_gin(domain: &[u8], msg: &[u8]) -> GinAffine {
                 let x = canonical_sqrt(x_root);
                 let p = GinAffine::new_unchecked(x, y);
                 debug_assert!(p.is_on_curve());
-                // Clear the cofactor.
-                let mut q = GinProj::from(p);
-                for _ in 0..cofactor[0].trailing_zeros() {
-                    q.double_in_place();
-                }
-                let q = q.into_affine();
+                let q = p.clear_cofactor();
                 if !q.is_zero() {
                     return q;
                 }
@@ -62,19 +54,18 @@ pub fn hash_to_gin(domain: &[u8], msg: &[u8]) -> GinAffine {
 /// `H₁` and `H₂` from the eVRF, each evaluated at `(sid, msg)` so different
 /// sessions produce independent base points (BUGS.md §5).
 pub fn h1(sid: &[u8], msg: &[u8]) -> GinAffine {
-    let mut input = Vec::with_capacity(sid.len() + msg.len() + 8);
-    input.extend_from_slice(&(sid.len() as u64).to_le_bytes());
-    input.extend_from_slice(sid);
-    input.extend_from_slice(msg);
-    hash_to_gin(b"H1", &input)
+    h_session(b"H1", sid, msg)
+}
+pub fn h2(sid: &[u8], msg: &[u8]) -> GinAffine {
+    h_session(b"H2", sid, msg)
 }
 
-pub fn h2(sid: &[u8], msg: &[u8]) -> GinAffine {
+fn h_session(tag: &'static [u8], sid: &[u8], msg: &[u8]) -> GinAffine {
     let mut input = Vec::with_capacity(sid.len() + msg.len() + 8);
     input.extend_from_slice(&(sid.len() as u64).to_le_bytes());
     input.extend_from_slice(sid);
     input.extend_from_slice(msg);
-    hash_to_gin(b"H2", &input)
+    hash_to_gin(tag, &input)
 }
 
 /// Pick the canonical square root: the one whose little-endian repr is
@@ -98,17 +89,6 @@ pub fn hash_to_fp(domain: &[u8], msg: &[u8]) -> Fp {
     h.update((msg.len() as u64).to_le_bytes());
     h.update(msg);
     Fp::from_le_bytes_mod_order(&h.finalize())
-}
-
-/// Hash to `G_out` (BLS12-381 G1) by hashing to `F_p` and multiplying the
-/// generator.  Note this is **not** an oblivious hash-to-curve (the discrete
-/// log of the output is `hash_to_fp(...)`), so this is only used for deriving
-/// public Bulletproofs generators where dlog knowledge is harmless (and even
-/// helpful for the simulator); see `zk/generators.rs` for a real "nothing up
-/// my sleeve" derivation if dlog hardness is needed.
-pub fn hash_to_gout_with_known_dlog(domain: &[u8], msg: &[u8]) -> crate::curves::GoutAffine {
-    let s = hash_to_fp(domain, msg);
-    crate::curves::gout_mul(&s)
 }
 
 #[cfg(test)]
@@ -138,7 +118,8 @@ mod tests {
     fn h2c_in_prime_subgroup() {
         // After cofactor clearing, scalar-multiplying by the subgroup order
         // gives identity.
-        use crate::curves::Fs;
+        use crate::curves::{Fs, GinProj};
+        use ark_ec::CurveGroup;
         let p = hash_to_gin(b"test", b"sub");
         let order_minus_one = -Fs::from(1u64);
         let q = (GinProj::from(p) * order_minus_one + GinProj::from(p)).into_affine();

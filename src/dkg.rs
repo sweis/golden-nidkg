@@ -116,10 +116,7 @@ pub fn create_dealing(
     omega: Option<Fp>,
 ) -> GoldenResult<(Dealing, DealingPrivate)> {
     if !pki.contains_key(&me.id) {
-        return Err(GoldenError::Internal(format!(
-            "dealer {} not in PKI",
-            me.id
-        )));
+        return Err(GoldenError::PartyNotInPki { id: me.id });
     }
     let omega = omega.unwrap_or_else(|| Fp::rand(rng));
     let (poly, shares) = shamir::share(omega, cfg.n, cfg.t, rng);
@@ -136,9 +133,7 @@ pub fn create_dealing(
             own_share = *x_ij;
             continue;
         }
-        let pk_j = pki
-            .get(j)
-            .ok_or_else(|| GoldenError::Internal(format!("recipient {} not in PKI", j)))?;
+        let pk_j = pki.get(j).ok_or(GoldenError::PartyNotInPki { id: *j })?;
         let (pad, witness) = eval_pad(sk, pk_j, &cfg.sid, &msg, &cfg.beta);
         let z = pad.r + x_ij;
         ciphertexts.insert(
@@ -213,9 +208,7 @@ pub fn verify_dealing(
     if expect_zero_secret && !dealing.commitment[0].is_zero() {
         return Err(GoldenError::NonZeroRefreshSecret { dealer: j });
     }
-    let pk_j = pki
-        .get(&j)
-        .ok_or_else(|| GoldenError::Internal(format!("dealer {} not in PKI", j)))?;
+    let pk_j = pki.get(&j).ok_or(GoldenError::PartyNotInPki { id: j })?;
     // The dealer must send exactly one ciphertext for every party except itself.
     let recipients: Vec<u32> = pki.keys().filter(|&&k| k != j).copied().collect();
     let mut peers = Vec::with_capacity(recipients.len());
@@ -240,9 +233,7 @@ pub fn verify_dealing(
                 recipient: k,
             });
         }
-        let pk_k = pki
-            .get(&k)
-            .ok_or_else(|| GoldenError::Internal(format!("recipient {} not in PKI", k)))?;
+        let pk_k = pki.get(&k).ok_or(GoldenError::PartyNotInPki { id: k })?;
         peers.push(EvrfPeerInputs {
             pk2: *pk_k,
             r_commit: ct.r_commit,

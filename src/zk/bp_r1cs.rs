@@ -114,7 +114,6 @@ impl<'g> Prover<'g> {
                 n, self.gens.gens_capacity
             ));
         }
-        let pad = n - n0;
         let m = self.assignments.v.len();
 
         let i_blinding = Fp::rand(rng);
@@ -123,39 +122,33 @@ impl<'g> Prover<'g> {
         let s_l: Vec<Fp> = (0..n).map(|_| Fp::rand(rng)).collect();
         let s_r: Vec<Fp> = (0..n).map(|_| Fp::rand(rng)).collect();
 
-        // 2. Commit to a_L, a_R, a_O, s_L, s_R.
+        // 2. Commit to a_L, a_R, a_O, s_L, s_R.  `A_I` and `S` use the same
+        //    base list `[B_b, G[..n], H[..n]]`; build it once.
         let (g_vec, h_vec) = self.gens.share(n);
         let a_l = pad_vec(&self.assignments.a_l, n);
         let a_r = pad_vec(&self.assignments.a_r, n);
         let a_o = pad_vec(&self.assignments.a_o, n);
+        let mut commit_bases = Vec::with_capacity(2 * n + 1);
+        commit_bases.push(self.gens.b_blinding);
+        commit_bases.extend_from_slice(g_vec);
+        commit_bases.extend_from_slice(h_vec);
+        let mut scalars = Vec::with_capacity(2 * n + 1);
         // A_I = B_b^α G^{a_L} H^{a_R}
-        let a_i_pt = {
-            let mut bases = vec![self.gens.b_blinding];
-            let mut scalars = vec![i_blinding];
-            bases.extend_from_slice(g_vec);
-            scalars.extend(&a_l);
-            bases.extend_from_slice(h_vec);
-            scalars.extend(&a_r);
-            msm(&bases, &scalars).into_affine()
-        };
+        scalars.push(i_blinding);
+        scalars.extend(&a_l);
+        scalars.extend(&a_r);
+        let a_i_pt = msm(&commit_bases, &scalars).into_affine();
         // A_O = B_b^β G^{a_O}
-        let a_o_pt = {
-            let mut bases = vec![self.gens.b_blinding];
-            let mut scalars = vec![o_blinding];
-            bases.extend_from_slice(g_vec);
-            scalars.extend(&a_o);
-            msm(&bases, &scalars).into_affine()
-        };
+        scalars.clear();
+        scalars.push(o_blinding);
+        scalars.extend(&a_o);
+        let a_o_pt = msm(&commit_bases[..n + 1], &scalars).into_affine();
         // S = B_b^ρ G^{s_L} H^{s_R}
-        let s_pt = {
-            let mut bases = vec![self.gens.b_blinding];
-            let mut scalars = vec![s_blinding];
-            bases.extend_from_slice(g_vec);
-            scalars.extend(&s_l);
-            bases.extend_from_slice(h_vec);
-            scalars.extend(&s_r);
-            msm(&bases, &scalars).into_affine()
-        };
+        scalars.clear();
+        scalars.push(s_blinding);
+        scalars.extend(&s_l);
+        scalars.extend(&s_r);
+        let s_pt = msm(&commit_bases, &scalars).into_affine();
 
         self.transcript.append_u64(b"m", m as u64);
         self.transcript.append_gout(b"A_I", &a_i_pt);
@@ -173,7 +166,7 @@ impl<'g> Prover<'g> {
         //    r(x) = y^n∘a_R·x − y^n + z_W_L·x + z_W_O + y^n∘s_R·x³
         //    where z_W_L = W_L^T z, etc.
         let y_pows = powers(y, n);
-        let mut y_inv_pows = powers(y.inverse().unwrap(), n);
+        let y_inv_pows = powers(y.inverse().unwrap(), n);
 
         let mut l_poly = VecPoly3::zero(n);
         let mut r_poly = VecPoly3::zero(n);
@@ -208,8 +201,7 @@ impl<'g> Prover<'g> {
         self.transcript.append_gout(b"T_4", &t_4);
         self.transcript.append_gout(b"T_5", &t_5);
         self.transcript.append_gout(b"T_6", &t_6);
-        let u = self.transcript.challenge_fp(b"u"); // unused in single-phase but kept for parity
-        let _ = u;
+        let _u = self.transcript.challenge_fp(b"u"); // unused in single-phase, kept for parity with the verifier
         let x = self.transcript.challenge_fp(b"x");
 
         // 6. Evaluate l(x), r(x), t(x) and synthetic blindings.
@@ -236,7 +228,7 @@ impl<'g> Prover<'g> {
         let w = self.transcript.challenge_fp(b"w");
         let q = (GoutProj::from(self.gens.b) * w).into_affine();
         let g_factors = vec![Fp::one(); n];
-        // Note: H_i are scaled by y^{-i} so the inner product is ⟨l, r⟩ in F_p.
+        // H_i are scaled by y^{-i} so the inner product is ⟨l, r⟩ in F_p.
         let ipp = InnerProductProof::create(
             &mut self.transcript,
             &q,
@@ -247,9 +239,6 @@ impl<'g> Prover<'g> {
             &l_vec,
             &r_vec,
         );
-        // Throw away the borrow.
-        let _ = &mut y_inv_pows;
-        let _ = pad;
 
         Ok(R1CSProof {
             a_i: a_i_pt,
@@ -378,8 +367,9 @@ impl<'g> Verifier<'g> {
 
         // Reconstruct the IPA verification scalars.
         let (u_sq, u_inv_sq, s) = proof.ipp.verification_scalars(n, &mut self.transcript)?;
-        let mut s_inv = s.clone();
-        s_inv.reverse();
+        // `s` is its own inverse under index reversal (s[n-1-i] = 1/s[i]), so
+        // index from the back instead of materialising a reversed copy.
+        let s_inv = |i: usize| s[n - 1 - i];
         let a = proof.ipp.a;
         let b = proof.ipp.b;
 
@@ -406,8 +396,9 @@ impl<'g> Verifier<'g> {
 
         // We assemble a single MSM with all the bases.
         //   coefficient_on_base · base, summed; should equal identity.
-        let mut bases: Vec<GoutAffine> = Vec::new();
-        let mut scalars: Vec<Fp> = Vec::new();
+        let cap = 2 * n + 2 * proof.ipp.l_vec.len() + m + 10;
+        let mut bases: Vec<GoutAffine> = Vec::with_capacity(cap);
+        let mut scalars: Vec<Fp> = Vec::with_capacity(cap);
 
         // ── second check (P) terms ──
         // A_I, A_O, S
@@ -427,7 +418,7 @@ impl<'g> Verifier<'g> {
         // H_i: y^{-i}·(x·z_W_L_i + z_W_O_i − y^i)  −  b·s_inv_i·y^{-i}
         for i in 0..n {
             bases.push(h_vec[i]);
-            scalars.push(y_inv_pows[i] * (x * fl.w_l[i] + fl.w_o[i] - y_pows[i] - b * s_inv[i]));
+            scalars.push(y_inv_pows[i] * (x * fl.w_l[i] + fl.w_o[i] - y_pows[i] - b * s_inv(i)));
         }
         // L, R from the IPA
         for i in 0..proof.ipp.l_vec.len() {

@@ -390,16 +390,17 @@ pub fn scalar_mul_const<CS: ConstraintSystem>(
     add_const(cs, &acc, &(-offset))
 }
 
-/// 2^k-entry table `{0·B, 1·B, …, (2^k-1)·B}`.
+/// 2^k-entry table `{0·B, 1·B, …, (2^k-1)·B}`.  Batch-normalised so the
+/// `O(2^k)` field inversions become one Montgomery batch inversion.
 fn build_table(base: &GinProj, k: usize) -> Vec<GinAffine> {
     let n = 1usize << k;
-    let mut out = Vec::with_capacity(n);
+    let mut tmp = Vec::with_capacity(n);
     let mut acc = GinProj::default();
     for _ in 0..n {
-        out.push(acc.into_affine());
+        tmp.push(acc);
         acc += base;
     }
-    out
+    GinProj::normalize_batch(&tmp)
 }
 
 /// Multilinear lookup of `table[∑ b_i 2^i]`.  Cost `2^k − k − 1` mul gates
@@ -422,48 +423,48 @@ fn lookup<CS: ConstraintSystem>(cs: &mut CS, bits: &[ScalarVar], table: &[GinAff
             mono.push(mul(cs, &bits[lo], &mono[rest]));
         }
     }
-    // Multilinear interpolation coefficients α_S = Σ_{T ⊆ S} (−1)^{|S|−|T|} table[T].coord.
-    let coeff = |coord: &dyn Fn(&GinAffine) -> Fp| -> Vec<Fp> {
-        let mut alpha = vec![Fp::zero(); 1 << k];
-        for s in 0usize..(1 << k) {
-            // Subset-sum / Möbius: α_S = Σ_{T ⊆ S} (−1)^{|S \ T|} f(T).
-            let mut t = s;
-            loop {
-                let sign = if ((s ^ t).count_ones()) % 2 == 0 {
-                    Fp::one()
-                } else {
-                    -Fp::one()
-                };
-                alpha[s] += sign * coord(&table[t]);
-                if t == 0 {
-                    break;
-                }
-                t = (t - 1) & s;
-            }
+    // Multilinear interpolation coefficients `α_S = Σ_{T ⊆ S} (−1)^{|S|−|T|} table[T].coord`,
+    // computed for both coordinates in one Möbius pass.  `table[0] = identity
+    // = (0, 1)` on Jubjub so its `(x, y)` are already the right values.
+    let coords = |p: &GinAffine| {
+        if p.is_zero() {
+            (Fp::zero(), Fp::one())
+        } else {
+            (p.x, p.y)
         }
-        alpha
     };
-    // The identity `(0, 1)` has y-coordinate `1`, and `table[0] = identity`.
-    let alpha_x = coeff(&|p: &GinAffine| if p.is_zero() { Fp::zero() } else { p.x });
-    let alpha_y = coeff(&|p: &GinAffine| if p.is_zero() { Fp::one() } else { p.y });
+    let mut alpha = vec![(Fp::zero(), Fp::zero()); 1 << k];
+    for s in 0usize..(1 << k) {
+        let mut t = s;
+        loop {
+            let sign = if ((s ^ t).count_ones()) % 2 == 0 {
+                Fp::one()
+            } else {
+                -Fp::one()
+            };
+            let (cx, cy) = coords(&table[t]);
+            alpha[s].0 += sign * cx;
+            alpha[s].1 += sign * cy;
+            if t == 0 {
+                break;
+            }
+            t = (t - 1) & s;
+        }
+    }
     // q.x = Σ alpha_x[S] · mono[S], q.y = Σ alpha_y[S] · mono[S].
     let mut x_lc = LinearCombination::zero();
     let mut y_lc = LinearCombination::zero();
     let mut x_w = Some(Fp::zero());
     let mut y_w = Some(Fp::zero());
-    for s in 0usize..(1 << k) {
-        x_lc = x_lc + mono[s].lc.clone() * alpha_x[s];
-        y_lc = y_lc + mono[s].lc.clone() * alpha_y[s];
-        x_w = x_w.zip(mono[s].w).map(|(a, b)| a + alpha_x[s] * b);
-        y_w = y_w.zip(mono[s].w).map(|(a, b)| a + alpha_y[s] * b);
-    }
-    let q_w = x_w.zip(y_w).map(|(x, y)| {
-        if x == Fp::zero() && y == Fp::one() {
-            GinAffine::zero()
-        } else {
-            GinAffine::new_unchecked(x, y)
+    for (s, (ax, ay)) in alpha.iter().enumerate() {
+        for (var, c) in &mono[s].lc.terms {
+            x_lc.add_term(*var, *c * ax);
+            y_lc.add_term(*var, *c * ay);
         }
-    });
+        x_w = x_w.zip(mono[s].w).map(|(a, b)| a + *ax * b);
+        y_w = y_w.zip(mono[s].w).map(|(a, b)| a + *ay * b);
+    }
+    let q_w = x_w.zip(y_w).map(|(x, y)| GinAffine::new_unchecked(x, y));
     PointVar {
         x: ScalarVar { lc: x_lc, w: x_w },
         y: ScalarVar { lc: y_lc, w: y_w },
@@ -472,24 +473,31 @@ fn lookup<CS: ConstraintSystem>(cs: &mut CS, bits: &[ScalarVar], table: &[GinAff
 }
 
 /// Fixed offset point — an arbitrary non-identity prime-order Jubjub point.
+/// Cached: this is called `3·peers + 1` times per circuit on both prover and
+/// verifier side, and `hash_to_gin` is a try-and-increment loop.
 fn offset_point() -> GinAffine {
-    crate::hash_to_curve::hash_to_gin(b"gadget-offset", b"v1")
+    static P: std::sync::OnceLock<GinAffine> = std::sync::OnceLock::new();
+    *P.get_or_init(|| crate::hash_to_curve::hash_to_gin(b"gadget-offset", b"v1"))
+}
+
+/// Decompose a prime-field element into `n_bits` little-endian bits
+/// (truncating or zero-padding as needed).
+pub fn field_to_bits_le<F: PrimeField>(v: &F, n_bits: usize) -> Vec<bool> {
+    let mut bits = v.into_bigint().to_bits_le();
+    bits.resize(n_bits, false);
+    bits
 }
 
 /// Decompose an `Fp` element into `n_bits` little-endian bits.
+#[inline]
 pub fn fp_to_bits_le(v: &Fp, n_bits: usize) -> Vec<bool> {
-    let mut bits = v.into_bigint().to_bits_le();
-    bits.resize(n_bits, false);
-    bits.truncate(n_bits);
-    bits
+    field_to_bits_le(v, n_bits)
 }
 
 /// Decompose an `Fs` element into `n_bits` little-endian bits.
+#[inline]
 pub fn fs_to_bits_le(v: &Fs, n_bits: usize) -> Vec<bool> {
-    let mut bits = v.into_bigint().to_bits_le();
-    bits.resize(n_bits, false);
-    bits.truncate(n_bits);
-    bits
+    field_to_bits_le(v, n_bits)
 }
 
 #[cfg(test)]

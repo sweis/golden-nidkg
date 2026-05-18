@@ -6,9 +6,10 @@
 //! and safe for the verifier to recompute.
 
 use crate::curves::{gout_gen, GoutAffine};
-use ark_ec::CurveGroup;
-use ark_ff::PrimeField;
-use sha2::{Digest, Sha512};
+use ark_ec::hashing::{
+    curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve,
+};
+use ark_ff::field_hashers::DefaultFieldHasher;
 
 /// Bulletproofs generator set.  `gens_capacity` is the maximum number of
 /// multiplication gates the proof can cover (must be a power of two).
@@ -25,20 +26,15 @@ pub struct BpGens {
     pub h_vec: Vec<GoutAffine>,
 }
 
-fn hash_to_gout_h2c(label: &[u8], i: u64) -> GoutAffine {
-    // Real hash-to-G1 via the WB map (RFC 9380), so the dlog of the result is
-    // unknown.  We use arkworks' built-in.
-    use ark_ec::hashing::{
-        curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve,
-    };
-    use ark_ff::field_hashers::DefaultFieldHasher;
-    type Hasher = MapToCurveBasedHasher<
-        ark_bls12_381::G1Projective,
-        DefaultFieldHasher<sha2::Sha256, 128>,
-        WBMap<ark_bls12_381::g1::Config>,
-    >;
-    let dst = b"golden-nidkg/bp-gens/v1";
-    let hasher = Hasher::new(dst).expect("hasher init");
+/// RFC 9380 hash-to-G1 (WB map) so the discrete log of the result is unknown.
+type Hasher = MapToCurveBasedHasher<
+    ark_bls12_381::G1Projective,
+    DefaultFieldHasher<sha2::Sha256, 128>,
+    WBMap<ark_bls12_381::g1::Config>,
+>;
+const H2C_DST: &[u8] = b"golden-nidkg/bp-gens/v1";
+
+fn hash_to_gout_h2c(hasher: &Hasher, label: &[u8], i: u64) -> GoutAffine {
     let mut msg = Vec::with_capacity(label.len() + 8);
     msg.extend_from_slice(label);
     msg.extend_from_slice(&i.to_le_bytes());
@@ -54,20 +50,27 @@ impl BpGens {
         );
         // `B = g_out` (so V-commitments with zero blinding are bare `g_out^v`).
         let b = gout_gen();
-        let b_blinding = hash_to_gout_h2c(b"B_blinding", 0);
+        let hasher = Hasher::new(H2C_DST).expect("hasher init");
+        let b_blinding = hash_to_gout_h2c(&hasher, b"B_blinding", 0);
+        // Build `G[]`, `H[]`.  `Hasher` is `Send + !Sync`, so the parallel path
+        // constructs one hasher per chunk via `map_init` (cheap relative to
+        // the hash work).
         let gen = |label: &'static [u8]| -> Vec<GoutAffine> {
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
                 (0..gens_capacity as u64)
                     .into_par_iter()
-                    .map(|i| hash_to_gout_h2c(label, i))
+                    .map_init(
+                        || Hasher::new(H2C_DST).expect("hasher init"),
+                        |h, i| hash_to_gout_h2c(h, label, i),
+                    )
                     .collect()
             }
             #[cfg(not(feature = "parallel"))]
             {
                 (0..gens_capacity as u64)
-                    .map(|i| hash_to_gout_h2c(label, i))
+                    .map(|i| hash_to_gout_h2c(&hasher, label, i))
                     .collect()
             }
         };
@@ -92,44 +95,6 @@ impl BpGens {
         );
         (&self.g_vec[..n], &self.h_vec[..n])
     }
-}
-
-/// Pedersen commitment generators used outside Bulletproofs (e.g. for
-/// blinded-S commitments in the linking proof).
-#[derive(Clone, Debug)]
-pub struct PedersenGens {
-    pub b: GoutAffine,
-    pub b_blinding: GoutAffine,
-}
-
-impl PedersenGens {
-    pub fn new() -> Self {
-        Self {
-            b: gout_gen(),
-            b_blinding: hash_to_gout_h2c(b"B_blinding", 0),
-        }
-    }
-    pub fn commit(&self, value: &crate::curves::Fp, blinding: &crate::curves::Fp) -> GoutAffine {
-        use crate::curves::GoutProj;
-        (GoutProj::from(self.b) * value + GoutProj::from(self.b_blinding) * blinding).into_affine()
-    }
-}
-
-impl Default for PedersenGens {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Cheaper hash-to-G1 for non-security-critical seeds (known dlog OK).
-#[allow(dead_code)]
-fn hash_to_gout_known_dlog(label: &[u8], i: u64) -> GoutAffine {
-    let mut h = Sha512::new();
-    h.update(b"golden-nidkg/bp-gens-fast/v1");
-    h.update(label);
-    h.update(i.to_le_bytes());
-    let s = crate::curves::Fp::from_le_bytes_mod_order(&h.finalize());
-    crate::curves::gout_mul(&s)
 }
 
 #[cfg(test)]

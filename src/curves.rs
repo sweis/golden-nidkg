@@ -46,25 +46,11 @@ pub fn x_coord(p: &GinAffine) -> Fp {
     }
 }
 
-/// `int(P.x)` interpreted as an `F_s` scalar, for use as an exponent on `G_in`.
+/// Reduce an `F_p` element modulo `s` and reinterpret as `F_s` (the
+/// `int(·)` cast from the eVRF, used to drive `G_in` exponentiations).
 ///
 /// `F_s` is smaller than `F_p`, so this is a (slightly biased) modular
 /// reduction.  See BUGS.md §8.
-#[inline]
-pub fn x_coord_as_scalar(p: &GinAffine) -> Fs {
-    let bytes = x_coord(p).into_bigint().to_bytes_le();
-    Fs::from_le_bytes_mod_order(&bytes)
-}
-
-/// Convert a `G_in` scalar (`F_s`) to the constraint field `F_p`.
-///
-/// `F_s ⊂ F_p` numerically (`s < p`), so this is an injection.
-#[inline]
-pub fn fs_to_fp(s: &Fs) -> Fp {
-    Fp::from_le_bytes_mod_order(&s.into_bigint().to_bytes_le())
-}
-
-/// Reduce an `F_p` element modulo `s` and reinterpret as `F_s`.
 #[inline]
 pub fn fp_to_fs(p: &Fp) -> Fs {
     Fs::from_le_bytes_mod_order(&p.into_bigint().to_bytes_le())

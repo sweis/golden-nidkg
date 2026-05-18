@@ -10,7 +10,7 @@
 use crate::curves::{Fp, GoutAffine, GoutProj};
 use crate::transcript::TranscriptExt;
 use ark_ec::{CurveGroup, VariableBaseMSM};
-use ark_ff::{Field, One, Zero};
+use ark_ff::{Field, One};
 use merlin::Transcript;
 
 #[derive(Clone, Debug)]
@@ -251,17 +251,6 @@ pub fn powers(x: Fp, n: usize) -> Vec<Fp> {
         acc *= x;
     }
     out
-}
-
-/// `∑_{i=0}^{n-1} x^i = (x^n - 1) / (x - 1)`.
-pub fn sum_of_powers(x: Fp, n: usize) -> Fp {
-    if x.is_one() {
-        return Fp::from(n as u64);
-    }
-    if n == 0 {
-        return Fp::zero();
-    }
-    (x.pow([n as u64]) - Fp::one()) * (x - Fp::one()).inverse().unwrap()
 }
 
 #[cfg(test)]

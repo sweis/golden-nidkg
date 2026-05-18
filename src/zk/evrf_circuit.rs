@@ -22,14 +22,12 @@
 //! DH step and another for the PKI key.  Steps 4–5 share the bit decomposition
 //! of `k`.
 
-use crate::curves::{Fp, GinAffine};
+use crate::curves::{gin_gen, Fp, GinAffine};
 use crate::evrf::{EvrfPublicInputs, EvrfWitness};
 use crate::zk::gadgets::{
-    add_const, assert_eq_point, bit_decompose_canonical, fp_to_bits_le, fs_to_bits_le,
-    scalar_mul_const, ScalarVar,
+    assert_eq_point, bit_decompose_canonical, fs_to_bits_le, scalar_mul_const, ScalarVar,
 };
 use crate::zk::r1cs::{ConstraintSystem, LinearCombination, Variable};
-use ark_ec::AffineRepr;
 use ark_ff::Field;
 
 /// Bit width used for `sk` and `k` decompositions.  `255` covers the full
@@ -108,7 +106,7 @@ fn build_shared_sk<CS: ConstraintSystem>(
     lambda: usize,
 ) -> Vec<ScalarVar> {
     let sk_bits = alloc_bits(cs, sk_w.map(|sk| fs_to_bits_le(sk, lambda)), lambda);
-    let pk1_circuit = scalar_mul_const(cs, &sk_bits, &g_in());
+    let pk1_circuit = scalar_mul_const(cs, &sk_bits, &gin_gen());
     assert_eq_point(cs, &pk1_circuit, pk1);
     sk_bits
 }
@@ -132,11 +130,7 @@ fn build_per_peer<CS: ConstraintSystem>(
     // k = int(S.x) and decompose into bits.  Must be the *canonical*
     // decomposition (sum < p), or a malicious prover can use `k + p` and
     // derive a different pad — see BUGS.md §10.
-    let k_var = ScalarVar {
-        lc: s.x.lc.clone(),
-        w: s.x.w,
-    };
-    let k_bits = bit_decompose_canonical(cs, &k_var, lambda);
+    let k_bits = bit_decompose_canonical(cs, &s.x, lambda);
     // T_1 = H_1^k, T_2 = H_2^k.
     let t1 = scalar_mul_const(cs, &k_bits, h1m);
     let t2 = scalar_mul_const(cs, &k_bits, h2m);
@@ -171,11 +165,6 @@ fn alloc_bits<CS: ConstraintSystem>(
     out
 }
 
-/// `g_in` — the Jubjub generator.
-fn g_in() -> GinAffine {
-    GinAffine::generator()
-}
-
 /// Compute the next-power-of-two number of multiplication gates for the
 /// `R_eVRF` circuit at a given `lambda`, so callers can size `BpGens`.
 pub fn gens_capacity(lambda: usize) -> usize {
@@ -193,13 +182,6 @@ pub fn batch_gens_capacity(lambda: usize, peers: usize) -> usize {
     // per peer: scalar_mul(S) + bit_decompose_canonical(k, λ) ≈ 2λ + 3×scalar_mul + ε
     let approx = (lambda + scalar_mul) + peers * (3 * scalar_mul + 2 * lambda + 4);
     approx.next_power_of_two()
-}
-
-// Silence the `add_const` and `fp_to_bits_le` import warnings.
-#[allow(dead_code)]
-fn _unused() {
-    let _ = add_const::<crate::zk::bp_r1cs::Verifier<'_>>;
-    let _ = fp_to_bits_le;
 }
 
 #[cfg(test)]

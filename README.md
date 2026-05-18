@@ -78,20 +78,21 @@ round-trip and rejects a tampered `R`.
 
 ## Performance (4-core x86-64, `--release` with `parallel`, `λ = 255`)
 
-| Operation              | n=3, t=2 | n=5, t=3 | Notes |
+| Operation              | n=3, t=2 | n=5, t=4 | Notes |
 |------------------------|----------|----------|-------|
-| ZK CRS setup           | ~1.4 s   | ~2.8 s   | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
-| Dealing (Round 0)      | ~3 s     | ~6 s     | One batched eVRF proof per dealer. |
-| Verify one dealing     | ~150 ms  | ~250 ms  | Single MSM. |
+| ZK CRS setup           | ~1.4 s   | ~3 s     | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
+| Dealing (Round 0)      | ~3.2 s   | ~5.6 s   | One batched eVRF proof per dealer. |
+| Verify one dealing     | ~140 ms  | ~220 ms  | Single MSM. |
 | Round 1                | <1 ms    | <1 ms    | |
-| Whole demo             | ~12 s    | ~40 s    | Incl. setup, 2× DKG (init + refresh). |
+| Whole demo             | ~25 s    | ~70 s    | Incl. setup, 2× DKG (init + refresh). |
 
 The implementation uses the *batched* protocol from §5.3 of the paper: one
 Bulletproofs proof per dealer covers all `n-1` evaluations, sharing the
-dealer's `sk` bit decomposition and `g_in^{sk}` gadget.  For `n=3` this is
-3922 mul gates (4096 generator pairs); each additional recipient adds ~2800
-gates.  The `R_eVRF` circuit uses 3-bit-window scalar multiplication
-(≈3.4 mul gates per scalar bit).
+dealer's `sk` bit decomposition and `g_in^{sk}` gadget.  For `n=5` this is
+≈13.4 k mul gates (16 384 generator pairs); each additional recipient adds
+~3.1 k gates.  The `R_eVRF` circuit uses 3-bit-window scalar multiplication
+(≈3.4 mul gates per scalar bit) and a chained `< p` comparison to make the
+`int(S.x)` decomposition canonical (see `BUGS.md §10`).
 
 ## License
 

@@ -24,7 +24,7 @@ rayon                = { version = "1", optional = true }
 hex                  = "0.4"
 
 [features]
-default = []
+default = ["parallel"]
 parallel = ["rayon", "ark-ec/parallel", "ark-ff/parallel", "ark-std/parallel"]
 
 [[example]]

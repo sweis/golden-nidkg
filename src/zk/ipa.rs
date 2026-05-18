@@ -102,17 +102,17 @@ impl InnerProductProof {
             let u = transcript.challenge_fp(b"u");
             let u_inv = u.inverse().unwrap();
 
-            // Fold.
+            // Fold.  The base folding (`g`, `h`) is the prover's hot loop —
+            // 4·n group scalar-mults total over all rounds.  We do it as a
+            // single batch and let rayon spread it when `--features parallel`.
             let mut a_new = Vec::with_capacity(half);
             let mut b_new = Vec::with_capacity(half);
-            let mut g_new = Vec::with_capacity(half);
-            let mut h_new = Vec::with_capacity(half);
             for i in 0..half {
                 a_new.push(a_lo[i] * u + a_hi[i] * u_inv);
                 b_new.push(b_lo[i] * u_inv + b_hi[i] * u);
-                g_new.push(g_lo[i] * u_inv + g_hi[i] * u);
-                h_new.push(h_lo[i] * u + h_hi[i] * u_inv);
             }
+            let g_new = fold_bases(g_lo, g_hi, u_inv, u);
+            let h_new = fold_bases(h_lo, h_hi, u, u_inv);
             a = a_new;
             b = b_new;
             g = g_new;
@@ -222,6 +222,24 @@ impl InnerProductProof {
 pub fn inner_product(a: &[Fp], b: &[Fp]) -> Fp {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b).map(|(x, y)| *x * y).sum()
+}
+
+/// `[lo[i]·s_lo + hi[i]·s_hi]_i` — fold two halves of a base vector.
+/// Parallelised under `--features parallel`.
+#[cfg(feature = "parallel")]
+fn fold_bases(lo: &[GoutProj], hi: &[GoutProj], s_lo: Fp, s_hi: Fp) -> Vec<GoutProj> {
+    use rayon::prelude::*;
+    lo.par_iter()
+        .zip(hi.par_iter())
+        .map(|(l, h)| *l * s_lo + *h * s_hi)
+        .collect()
+}
+#[cfg(not(feature = "parallel"))]
+fn fold_bases(lo: &[GoutProj], hi: &[GoutProj], s_lo: Fp, s_hi: Fp) -> Vec<GoutProj> {
+    lo.iter()
+        .zip(hi)
+        .map(|(l, h)| *l * s_lo + *h * s_hi)
+        .collect()
 }
 
 /// Vandermonde powers `1, x, x², …, x^{n-1}`.

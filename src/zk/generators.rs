@@ -55,12 +55,24 @@ impl BpGens {
         // `B = g_out` (so V-commitments with zero blinding are bare `g_out^v`).
         let b = gout_gen();
         let b_blinding = hash_to_gout_h2c(b"B_blinding", 0);
-        let g_vec = (0..gens_capacity as u64)
-            .map(|i| hash_to_gout_h2c(b"G", i))
-            .collect();
-        let h_vec = (0..gens_capacity as u64)
-            .map(|i| hash_to_gout_h2c(b"H", i))
-            .collect();
+        let gen = |label: &'static [u8]| -> Vec<GoutAffine> {
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                (0..gens_capacity as u64)
+                    .into_par_iter()
+                    .map(|i| hash_to_gout_h2c(label, i))
+                    .collect()
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                (0..gens_capacity as u64)
+                    .map(|i| hash_to_gout_h2c(label, i))
+                    .collect()
+            }
+        };
+        let g_vec = gen(b"G");
+        let h_vec = gen(b"H");
         Self {
             gens_capacity,
             b,

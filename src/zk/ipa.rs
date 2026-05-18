@@ -179,18 +179,17 @@ impl InnerProductProof {
         h_vec: &[GoutAffine],
     ) -> Result<(), String> {
         let (u_sq, u_inv_sq, s) = self.verification_scalars(n, transcript)?;
-        let mut s_inv = s.clone();
-        s_inv.reverse(); // s_inv[i] = 1/s[i] — by symmetry of the s vector
-
         // Expected = ∑ a*s_i*g_factor_i G_i + ∑ b*s_inv_i*h_factor_i H_i + a*b Q
         //            - ∑ u_sq_i L_i - ∑ u_inv_sq_i R_i
+        // `s` is its own inverse under reversal: `s[n-1-i] = 1/s[i]`.
         let g_scalars: Vec<Fp> = s
             .iter()
             .zip(g_factors)
             .map(|(si, gf)| self.a * si * gf)
             .collect();
-        let h_scalars: Vec<Fp> = s_inv
+        let h_scalars: Vec<Fp> = s
             .iter()
+            .rev()
             .zip(h_factors)
             .map(|(si, hf)| self.b * si * hf)
             .collect();

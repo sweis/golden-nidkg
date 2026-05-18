@@ -606,6 +606,56 @@ mod tests {
     }
 
     #[test]
+    fn scalar_mul_witness_correct_for_random_inputs() {
+        // Sanity: the *witness* threading of `scalar_mul_const` must match
+        // arkworks for many random scalars and bases — including inputs with
+        // boundary chunks (`λ` not a multiple of `WINDOW`).  This exercises
+        // the multilinear lookup arithmetic without paying for a full proof.
+        let mut rng = ark_std::test_rng();
+        let gens = BpGens::new(8);
+        for nbits in [1usize, 2, 3, 4, 7, 9, 15, 24] {
+            for _ in 0..10 {
+                let base = (GinProj::generator() * Fs::rand(&mut rng)).into_affine();
+                let raw = Fs::rand(&mut rng);
+                let scalar = Fs::from_le_bytes_mod_order(
+                    &raw.into_bigint().to_bytes_le()[..nbits.div_ceil(8).max(1)],
+                );
+                // Truncate to `nbits` bits.
+                let mut bits_w = fs_to_bits_le(&scalar, nbits);
+                bits_w.truncate(nbits);
+                let scalar_truncated: Fs = {
+                    let mut acc = Fs::from(0u64);
+                    let mut p = Fs::from(1u64);
+                    for &b in &bits_w {
+                        if b {
+                            acc += p;
+                        }
+                        p += p;
+                    }
+                    acc
+                };
+                let expected = (GinProj::from(base) * scalar_truncated).into_affine();
+                // Build a *prover* (with witness) just to run the gadget.
+                let mut cs = Prover::new(&gens, Transcript::new(b"witness-test"));
+                let bits: Vec<ScalarVar> = bits_w
+                    .iter()
+                    .map(|&b| alloc_bit(&mut cs, Some(b)))
+                    .collect();
+                let out = scalar_mul_const(&mut cs, &bits, &base);
+                assert_eq!(out.w.unwrap(), expected, "nbits={nbits}, scalar={scalar:?}");
+                // The naive (5-mul-per-bit) gadget must agree.
+                let mut cs2 = Prover::new(&gens, Transcript::new(b"witness-test-2"));
+                let bits2: Vec<ScalarVar> = bits_w
+                    .iter()
+                    .map(|&b| alloc_bit(&mut cs2, Some(b)))
+                    .collect();
+                let out2 = scalar_mul_const_naive(&mut cs2, &bits2, &base);
+                assert_eq!(out2.w.unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
     fn linked_committed_variable() {
         // Verify that a committed value with γ=0 produces the linking
         // commitment `V = B^v` and the circuit can reference it.

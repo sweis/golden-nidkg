@@ -101,34 +101,41 @@ src/
   schnorr.rs          Schnorr PoK over G_in for PKI registration
   hash_to_curve.rs    deterministic hash-to-Jubjub
   evrf.rs             two-party eVRF: pad derivation + (proof types)
+  transcript.rs       Merlin-based Fiat-Shamir transcript helpers
+  errors.rs           error types
   zk/
-    mod.rs
-    transcript.rs     Merlin-based Fiat-Shamir transcripts
+    mod.rs            survey of why a hand-rolled BP is needed; re-exports
+    generators.rs     Pedersen generator vectors for Bulletproofs (CRS)
     r1cs.rs           constraint system + linear combinations
     ipa.rs            inner-product argument
     bp_r1cs.rs        Bulletproofs R1CS prover/verifier
-    gadgets.rs        bit decomposition, embedded-curve scalar mult
-    evrf_circuit.rs   the R_eVRF circuit
-  dkg.rs              Round0/Round1, dealing/verify/complete
-  errors.rs           error types
+    gadgets.rs        bit decomposition, embedded-curve scalar mult (3-bit window)
+    evrf_circuit.rs   the R_eVRF circuit (single + batched)
+    evrf_proof.rs     ZkParams, prove/verify_evrf_batch, EvrfProof
+  dkg.rs              Round0/Round1, dealing/verify/complete, refresh
 examples/
-  demo.rs             end-to-end demo: n-party DKG, verification, recovery
+  demo.rs             end-to-end demo: n-party DKG, verification, recovery, refresh
+tests/
+  dkg.rs              protocol & adversarial integration tests (quick mode)
+  zk_full.rs          full-ZK round-trips (`#[ignore]`d, run with `--ignored`)
 ```
 
 ## Building & testing
 
 ```
 cargo build
-cargo test
-cargo run --example demo               # default n=5, t=3
-cargo run --example demo -- 7 4        # custom n, t
+cargo test                                # quick protocol + circuit tests
+cargo test --release -- --ignored         # full-ZK round-trips (~30s)
+cargo run --release --example demo                  # default n=5, t=4
+cargo run --release --example demo -- 3 2           # custom n, t
+cargo run --release --example demo -- 5 3 quick     # protocol-only, no real ZK
 ```
 
 ## Status / TODO
 
 - [x] Project skeleton, CLAUDE.md, BUGS.md
 - [x] Curve types, Shamir, Feldman VSS, Lagrange
-- [x] Schnorr PoK for PKI
+- [x] Schnorr PoK for PKI (identity-bound, replay/rogue-key safe)
 - [x] Hash-to-curve (Jubjub)
 - [x] eVRF pad derivation + symmetry test
 - [x] DKG Round0 / verify / Round1
@@ -140,6 +147,16 @@ cargo run --example demo -- 7 4        # custom n, t
       tampered R, replay)
 - [x] Threshold reconstruction test (`t` parties recover `sk`, `t-1` cannot)
 - [x] Key refresh (`omega_i = 0`)
+- [x] Batched eVRF proof (Section 5.3): one proof per dealer, shared `sk` gadget
+- [x] 3-bit window scalar mult gadget + Karatsuba `add_var` (~3.4 muls/bit)
+- [x] Parallel IPA fold + parallel CRS setup (`--features parallel`, default on)
+- [ ] Key resharing / membership change (Section 5.2 mentions this is supported
+      via the same machinery as refresh; not implemented here)
+- [ ] Constant-time hash-to-curve (current impl is try-and-increment)
+- [ ] Serialization (`ark-serialize` / `borsh`) for `Dealing`, `EvrfProof`, etc.
+- [ ] Aggregate the cheap `g^z = R · X` check into one MSM
+- [ ] Batch-verification of multiple dealings' Bulletproofs (random linear
+      combination across proofs — Section 5.3 mentions ~30% verifier savings)
 
 ## Notes & gotchas (see BUGS.md for paper-level findings)
 

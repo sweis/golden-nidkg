@@ -49,7 +49,9 @@ disallow two parties registering the same key; the standard `F_ca` from
 Canetti's framework does *not* enforce this.
 
 This implementation binds the registrant identity into the PoK transcript
-(`schnorr.rs`).  See `tests/rogue_key.rs` for a regression test.
+(`schnorr.rs`).  See `tests/dkg.rs::rogue_key_pki_detected`,
+`schnorr::tests::pok_replay_to_other_id_fails`, and
+`schnorr::tests::pki_collision_rejected` for regression tests.
 
 > If the PDF in fact specifies an identity-bound PoK, downgrade this to
 > "implementation guidance the paper should make explicit."  If it does not
@@ -58,35 +60,39 @@ This implementation binds the registrant identity into the PoK transcript
 ---
 
 ## 2. x-coordinate symmetry in the eVRF / "negate-the-key" pad collision —
-   **likely a real but bounded gap in `R_eVRF`**
+   **curve-dependent — none on Jubjub-with-x, real on short Weierstrass**
 
-`R_eVRF` (Figure 3) computes `k = int(S.x)` where `S = PK_2^{sk_1}`.  Taking
-the x-coordinate (or u-coordinate, for an Edwards curve) is a 2-to-1 map:
-`S.x = (-S).x`.  Therefore the pad derived from `(sk_j, PK_k)` equals the pad
-derived from `(sk_j, -PK_k)` — because `PK_k^{sk_j}` and `(-PK_k)^{sk_j} =
--(PK_k^{sk_j})` share an x-coordinate.
+`R_eVRF` (Figure 3) computes `k = int(S.x)` where `S = PK_2^{sk_1}`.  Whether
+`P ↦ P.x` is injective on the prime-order subgroup of `E(F_p)` depends on the
+curve form:
 
-This means a recipient with key `PK_k' = -PK_k` (i.e. `sk_k' = -sk_k`) gets
-*the same* pad as recipient `k` from every sender, leading to the same
-share-difference leak as item 1.
+* **Short Weierstrass.**  `−P = (P.x, −P.y)`, so `.x` is a 2-to-1 map even
+  inside the prime-order subgroup.  Then `(sk_j, −PK_k)` derives *the same*
+  pad as `(sk_j, PK_k)` (because `(−PK_k)^{sk_j} = −(PK_k^{sk_j})` shares an
+  x-coordinate).  A recipient who registers `−PK_k` for an honest party `k`
+  would learn `f_j(idx) − f_j(k)` from the broadcast difference, the same
+  share-recovery as item 1.  Registering `−PK_k` requires knowing `−sk_k`, so
+  a sound PoK prevents the attack — but the *semantic* gap remains: the eVRF
+  output is unique only per unordered pair of `±PK`, not per public-key pair,
+  which the eVRF uniqueness definition and the simulation bookkeeping must
+  account for.
+* **Twisted Edwards** (this implementation uses Jubjub, `−P = (−P.x, P.y)`).
+  Here `(P.x, P.y)` and `(P.x, −P.y)` differ by the 2-torsion point `(0, −1)`,
+  which is *not* in the odd-order prime subgroup.  So **`.x` *is* injective on
+  the prime-order subgroup** — there is no negate-the-key symmetry.  Verified
+  in `curves::tests::jubjub_x_is_injective_on_prime_subgroup`.
 
-In contrast to item 1, this *is* prevented by a sound PoK: registering
-`-PK_k` requires knowing `-sk_k`.  But it is worth flagging because:
+The paper's Figure 3 uses unspecified curve notation `E(F_p)`.  If the
+intended curve is short-Weierstrass, the negate symmetry should be addressed
+in the eVRF definitions and the simulator.  If the intended curve is
+Edwards/twisted Edwards (likely, since the embedded-curve trick implies a
+circuit-friendly curve), this is a non-issue but should be stated.
 
-* It is *not* prevented by a "no duplicate keys" rule alone (`PK_k` and
-  `-PK_k` are distinct group elements).
-* It means **the eVRF output is not unique per (sender, recipient) public-key
-  pair** — it is unique only per *unordered pair of `±PK`*.  Definitions of
-  VRF/eVRF uniqueness should be examined for whether this matters formally.
-* In the simulation argument, the simulator's bookkeeping of pads keyed on
-  `(PK_1, PK_2, msg)` must therefore either also key on the sign of `S`, or
-  the proof must explicitly argue this never matters.
-
-**Mitigation for implementers:** check `PK ≠ -PK'` for all distinct `(P, P')`
-in the PKI snapshot before running the DKG (this implementation does so in
-`dkg::verify_pki`).  Better: hash the *full* point `S` (e.g. its compressed
-serialization) instead of only `S.x` when deriving `k`, which removes the
-symmetry entirely at the cost of one extra bit-decomposition in the circuit.
+**Mitigation for implementers regardless of curve:** check `PK ≠ −PK'` for
+all distinct registered keys before running the DKG (this implementation
+does so in `schnorr::verify_pki`), or hash the *full* point `S` (compressed
+serialization) instead of `S.x` when deriving `k` — at the cost of a few
+more bits in the in-circuit decomposition.
 
 ---
 
@@ -144,8 +150,9 @@ vector of length `t' ≠ t`:
 
 Figure 4 (per the available notes) parses `C_j → (A_{j,0}, …, A_{j,t-1})`
 without an explicit `|C_j| = t` abort.  A reference implementation must check
-the length before computing `X_{jk}`.  This implementation does so and there
-is a regression test (`tests/dkg_negative.rs::wrong_degree_commitment`).
+the length before computing `X_{jk}`.  This implementation does so
+(`dkg::verify_dealing` returns `WrongCommitmentLength`) and there is a
+regression test (`tests/dkg.rs::wrong_degree_commitment_rejected`).
 
 ---
 
@@ -219,19 +226,19 @@ explicitly absorbed into the LHL bound; for Jubjub-over-BLS12-381 they are
 
 ---
 
-## 9. Performance table — minor inconsistency / typo to verify
+## 9. Performance table — initially looked off, now understood (resolved)
 
 The summary's Table 2 (Section 5.3) lists "comm. (unopt.) 3.7 MB" for `n=50`
-and "comm. (opt.) 223 kb", a ~17× ratio.  The proof-size table (Section 4.6)
-gives single-statement proof size ≈1.5 kb and 49-statement batch ≈2.1 kb.
-Unoptimised communication for 49 dealings ≈ 49 × (1.5 kb + ε) ≈ 75 kb, not
-3.7 MB.  The 3.7 MB figure is more consistent with a *quadratic* (n²)
-unbatched communication count (everyone forwarding everyone's dealings), or
-with byte/bit confusion.  Worth double-checking the units and what's being
-counted.
+and "comm. (opt.) 223 kb", a ~17× ratio.  At first read this looked
+inconsistent with the per-proof size in Section 4.6 (≈1.5 kb).  After
+implementing both, this is *not* an inconsistency: the unoptimised variant
+ships `n-1` separate eVRF proofs per dealing, so each participant *downloads*
+`(n-1) × (n-1) × 1.5 kb ≈ 49² × 1.5 kb ≈ 3.6 MB` — quadratic in `n`.  The
+batched variant ships one logarithmic-size proof per dealing (`≈ 2 kb`), so
+the download is `(n-1) × (2 kb + share material) ≈ 220 kb` — linear.  The
+~17× ratio at `n=50` is the proof-count savings, not a unit error.
 
-> This may be a misreading of the paper's tables on my part — the inconsistency
-> is between two tables in a third-party summary.  Verify against the PDF.
+This implementation defaults to the batched proof.
 
 ---
 

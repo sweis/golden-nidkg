@@ -14,15 +14,20 @@
 //!
 //! ## Cost summary (number of multiplication gates)
 //!
-//! | gadget                   | muls         |
-//! |--------------------------|--------------|
-//! | `bit_decompose(λ)`       | `λ`          |
-//! | `add_const`              | 3            |
-//! | `add_var`                | 8            |
-//! | `cond_add_const`         | 5 (= 3 + 2)  |
-//! | `scalar_mul_const(λ)`    | `5λ + 3`     |
-//! | `r_eVRF` total ≈ 4·sm + 2·bd ≈ `22λ + …` (we don't try to hit the
-//!   paper's `14λ + 14`; that figure assumes more aggressive windowing/sharing.) |
+//! | gadget                                | muls               |
+//! |---------------------------------------|--------------------|
+//! | `bit_decompose(λ)`                    | `λ`                |
+//! | `add_const`                           | 3                  |
+//! | `add_var` (Karatsuba cross-products)  | 6                  |
+//! | `cond_add_const`                      | 5 (= 3 + 2)        |
+//! | `scalar_mul_const_naive(λ)`           | `5λ + 3`           |
+//! | `scalar_mul_const(λ)` (3-bit window)  | `≈ 10⌈λ/3⌉ + 3`    |
+//!
+//! The 3-bit window's per-chunk cost is `4` monomial pre-products + `6`
+//! `add_var` muls = `10` per `3` bits, ≈ `3.4` per bit.  This matches the
+//! paper's `3λ + 2` exponentiation gadget budget within a small constant.
+//! `R_eVRF` per-recipient is `≈ 3·(3.4λ) + λ ≈ 11λ`; the dealer's shared
+//! `g_in^{sk}` and `sk` decomposition adds `≈ 4.4λ` once.
 
 use crate::curves::{Fp, Fs, GinAffine, GinProj};
 use crate::zk::r1cs::{ConstraintSystem, LinearCombination};
@@ -30,11 +35,6 @@ use ark_ec::twisted_edwards::TECurveConfig;
 use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ed_on_bls12_381::JubjubConfig;
 use ark_ff::{BigInteger, Field, One, PrimeField, Zero};
-
-/// Number of bits used for scalar decompositions in the `R_eVRF` circuit.
-/// `int(S.x)` is an `F_p` element of up to 255 bits; `sk_1` is an `F_s`
-/// element of up to 252 bits.  We use 255 to cover both.
-pub const LAMBDA: usize = 255;
 
 /// A scalar in the circuit: an LC plus the prover's value.
 #[derive(Clone, Debug)]

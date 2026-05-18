@@ -76,20 +76,22 @@ design (Bulletproofs §5 / BCC+16) to arkworks.  It is unit-tested against
 tampered witnesses, and the `R_eVRF` circuit test verifies a full 255-bit proof
 round-trip and rejects a tampered `R`.
 
-## Performance (single core, x86-64, `--release`)
+## Performance (4-core x86-64, `--release` with `parallel`, `λ = 255`)
 
-| Operation              | n=3, t=2 | Notes |
-|------------------------|----------|-------|
-| ZK CRS setup           | ~5 s     | Hash-to-G1 for 16 k generators; one-time. |
-| Dealing (Round 0)      | ~17 s    | 2 eVRF proofs of ~5.6 k mul gates each. |
-| Verify one dealing     | ~1 s     | Single MSM. |
-| Round 1                | <1 ms    | |
+| Operation              | n=3, t=2 | n=5, t=3 | Notes |
+|------------------------|----------|----------|-------|
+| ZK CRS setup           | ~1.4 s   | ~2.8 s   | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
+| Dealing (Round 0)      | ~3 s     | ~6 s     | One batched eVRF proof per dealer. |
+| Verify one dealing     | ~150 ms  | ~250 ms  | Single MSM. |
+| Round 1                | <1 ms    | <1 ms    | |
+| Whole demo             | ~12 s    | ~40 s    | Incl. setup, 2× DKG (init + refresh). |
 
-The current implementation produces one eVRF proof per `(dealer, recipient)`
-pair (the unbatched protocol from §5.2).  The paper's §5.3 optimisation batches
-all `n-1` evaluations into a single proof per dealer, sharing the dealer's `sk`
-bit decomposition and `g_in^{sk}` gadget; this would roughly halve communication
-and verification time for `n ≥ 5`.  See `CLAUDE.md` for the TODO.
+The implementation uses the *batched* protocol from §5.3 of the paper: one
+Bulletproofs proof per dealer covers all `n-1` evaluations, sharing the
+dealer's `sk` bit decomposition and `g_in^{sk}` gadget.  For `n=3` this is
+3922 mul gates (4096 generator pairs); each additional recipient adds ~2800
+gates.  The `R_eVRF` circuit uses 3-bit-window scalar multiplication
+(≈3.4 mul gates per scalar bit).
 
 ## License
 

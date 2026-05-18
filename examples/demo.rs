@@ -57,12 +57,15 @@ fn main() {
     println!("    all PoKs verified, no key collisions");
 
     // ── ZK setup ──
-    println!("\n[2] Setting up ZK proof system (one-time CRS)…");
+    println!(
+        "\n[2] Setting up ZK proof system (one-time CRS, sized for {n}-1 = {} recipients)…",
+        n - 1
+    );
     let setup_start = Instant::now();
     let zk = if quick {
         ZkParams::insecure_quick()
     } else {
-        ZkParams::full()
+        ZkParams::full((n - 1) as usize)
     };
     println!(
         "    {} mode, {} generator pairs, {:?}",
@@ -230,15 +233,12 @@ fn hex_prefix(b: &[u8], n: usize) -> String {
 fn approx_dealing_size(d: &golden_nidkg::Dealing) -> usize {
     let pt = 48; // compressed BLS12-381 G1
     let sc = 32; // Fp scalar
-    let proof_sz = match d.ciphertexts.values().next() {
-        Some(ct) => match &ct.proof {
-            golden_nidkg::zk::evrf_proof::EvrfProof::Full(p) => {
-                // A_I, A_O, S, T_1..T_6 + IPA L/R + 3 scalars
-                (3 + 5 + 2 * p.ipp.l_vec.len()) * pt + 3 * sc
-            }
-            golden_nidkg::zk::evrf_proof::EvrfProof::InsecureQuick(_) => pt + sc,
-        },
-        None => 0,
+    let proof_sz = match &d.proof {
+        golden_nidkg::zk::evrf_proof::EvrfProof::Full(p) => {
+            // A_I, A_O, S, T_1..T_6 + IPA L/R + 3 scalars
+            (3 + 5 + 2 * p.ipp.l_vec.len()) * pt + 3 * sc
+        }
+        golden_nidkg::zk::evrf_proof::EvrfProof::InsecureQuick(v) => v.len() * (pt + sc),
     };
-    32 + d.commitment.len() * pt + d.ciphertexts.len() * (pt + sc + proof_sz)
+    32 + d.commitment.len() * pt + d.ciphertexts.len() * (pt + sc) + proof_sz
 }

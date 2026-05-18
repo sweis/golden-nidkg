@@ -39,6 +39,13 @@ pub fn default_lambda() -> usize {
     255
 }
 
+/// Public inputs for one *recipient* in a batched proof.
+#[derive(Clone, Debug)]
+pub struct EvrfPeerInputs {
+    pub pk2: GinAffine,
+    pub r_commit: crate::curves::GoutAffine,
+}
+
 /// Build the `R_eVRF` circuit on a `ConstraintSystem`.
 ///
 /// `r_var` is the `Variable` allocated for the committed pad value `r`
@@ -52,32 +59,89 @@ pub fn build_circuit<CS: ConstraintSystem>(
     wit: Option<&EvrfWitness>,
     lambda: usize,
 ) {
-    // ── 0. Allocate sk's bits and constrain PK_1 = g_in^{sk}. ──
-    // sk is a witness; we represent it via its bit decomposition only.
-    let sk_bits = alloc_bits(cs, wit.map(|w| fs_to_bits_le(&w.sk, lambda)), lambda);
+    let sk_bits = build_shared_sk(cs, &pubs.pk1, wit.map(|w| &w.sk), lambda);
+    build_per_peer(
+        cs, &sk_bits, &pubs.pk2, &pubs.h1m, &pubs.h2m, pubs.beta, r_var, wit, lambda,
+    );
+}
+
+/// Build the *batched* `R_eVRF` circuit (Section 5.3): one proof covering
+/// `n-1` recipients.  The dealer's `sk` bit decomposition and `g_in^{sk}`
+/// gadget are shared.
+///
+/// `peers` and `r_vars` and `wits` (if `Some`) must be the same length and
+/// in the same order.
+pub fn build_batch_circuit<CS: ConstraintSystem>(
+    cs: &mut CS,
+    pk1: &GinAffine,
+    h1m: &GinAffine,
+    h2m: &GinAffine,
+    beta: Fp,
+    peers: &[EvrfPeerInputs],
+    r_vars: &[Variable],
+    wits: Option<&[EvrfWitness]>,
+    lambda: usize,
+) {
+    debug_assert_eq!(peers.len(), r_vars.len());
+    debug_assert!(wits.is_none_or(|w| w.len() == peers.len()));
+    let sk_bits = build_shared_sk(cs, pk1, wits.and_then(|w| w.first()).map(|w| &w.sk), lambda);
+    for (i, peer) in peers.iter().enumerate() {
+        build_per_peer(
+            cs,
+            &sk_bits,
+            &peer.pk2,
+            h1m,
+            h2m,
+            beta,
+            r_vars[i],
+            wits.map(|w| &w[i]),
+            lambda,
+        );
+    }
+}
+
+/// Shared part: allocate `sk`'s bits and constrain `PK_1 = g_in^{sk}`.
+fn build_shared_sk<CS: ConstraintSystem>(
+    cs: &mut CS,
+    pk1: &GinAffine,
+    sk_w: Option<&crate::curves::Fs>,
+    lambda: usize,
+) -> Vec<ScalarVar> {
+    let sk_bits = alloc_bits(cs, sk_w.map(|sk| fs_to_bits_le(sk, lambda)), lambda);
     let pk1_circuit = scalar_mul_const(cs, &sk_bits, &g_in());
-    assert_eq_point(cs, &pk1_circuit, &pubs.pk1);
+    assert_eq_point(cs, &pk1_circuit, pk1);
+    sk_bits
+}
 
-    // ── 1. S = PK_2^{sk}.  PK_2 is a public point so this is constant-base. ──
-    let s = scalar_mul_const(cs, &sk_bits, &pubs.pk2);
-
-    // ── 2–3. k = int(S.x).  Decompose into bits for the next steps. ──
+/// Per-peer part: `S = PK_2^{sk}`, `k = S.x`, `T_1 = H_1^k`, `T_2 = H_2^k`,
+/// `r = β·T_1.x + T_2.x` constrained to the committed `r_var`.
+fn build_per_peer<CS: ConstraintSystem>(
+    cs: &mut CS,
+    sk_bits: &[ScalarVar],
+    pk2: &GinAffine,
+    h1m: &GinAffine,
+    h2m: &GinAffine,
+    beta: Fp,
+    r_var: Variable,
+    wit: Option<&EvrfWitness>,
+    lambda: usize,
+) {
+    // S = PK_2^{sk}.  PK_2 is a public point so this is constant-base.
+    let s = scalar_mul_const(cs, sk_bits, pk2);
+    debug_assert!(wit.is_none() || s.w.unwrap() == wit.unwrap().s);
+    // k = int(S.x) and decompose into bits.
     let k_var = ScalarVar {
         lc: s.x.lc.clone(),
         w: s.x.w,
     };
     let k_bits = bit_decompose(cs, &k_var, lambda);
-    // Cross-check the prover's witness.  The verifier sees `None`.
-    debug_assert!(wit.is_none() || s.w.unwrap() == wit.unwrap().s);
-
-    // ── 4–5. T_1 = H_1^k, T_2 = H_2^k. ──
-    let t1 = scalar_mul_const(cs, &k_bits, &pubs.h1m);
-    let t2 = scalar_mul_const(cs, &k_bits, &pubs.h2m);
+    // T_1 = H_1^k, T_2 = H_2^k.
+    let t1 = scalar_mul_const(cs, &k_bits, h1m);
+    let t2 = scalar_mul_const(cs, &k_bits, h2m);
     debug_assert!(wit.is_none() || t1.w.unwrap() == wit.unwrap().t1);
     debug_assert!(wit.is_none() || t2.w.unwrap() == wit.unwrap().t2);
-
-    // ── 6–8. r = β·r_1 + r_2.  ──
-    let r_lc = t1.x.lc * pubs.beta + t2.x.lc;
+    // r = β·r_1 + r_2.
+    let r_lc = t1.x.lc * beta + t2.x.lc;
     cs.constrain(r_lc - r_var);
 }
 
@@ -113,13 +177,17 @@ fn g_in() -> GinAffine {
 /// Compute the next-power-of-two number of multiplication gates for the
 /// `R_eVRF` circuit at a given `lambda`, so callers can size `BpGens`.
 pub fn gens_capacity(lambda: usize) -> usize {
+    batch_gens_capacity(lambda, 1)
+}
+
+/// Compute the gens capacity for a *batched* circuit covering `peers`
+/// recipients.
+pub fn batch_gens_capacity(lambda: usize, peers: usize) -> usize {
     // Per gadget cost (see gadgets.rs cost summary):
-    //   alloc_bits(λ)              : λ
-    //   scalar_mul_const(λ)        : 5λ + 3
-    //   bit_decompose(λ)           : λ
-    //   ×3 more scalar_mul_const   : 3·(5λ + 3)
-    // total ≈ 22λ + 12
-    let approx = 22 * lambda + 12;
+    //   shared:   alloc_bits(λ) + scalar_mul_const(λ) ≈ λ + (5λ+3) = 6λ + 3
+    //   per peer: scalar_mul_const + bit_decompose + 2×scalar_mul_const
+    //             ≈ (5λ+3) + λ + 2(5λ+3) ≈ 16λ + 9
+    let approx = (6 * lambda + 3) + peers * (16 * lambda + 9);
     approx.next_power_of_two()
 }
 

@@ -57,4 +57,6 @@ pub mod generators;
 pub mod ipa;
 pub mod r1cs;
 
-pub use evrf_proof::{prove_evrf, verify_evrf, EvrfProof, ZkMode, ZkParams};
+pub use evrf_proof::{
+    prove_evrf_batch, verify_evrf_batch, BatchPublicInputs, EvrfProof, ZkMode, ZkParams,
+};

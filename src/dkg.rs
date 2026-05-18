@@ -30,12 +30,14 @@
 
 use crate::curves::{gout_mul, Fp, Fs, GinAffine, GoutAffine, GoutProj};
 use crate::errors::{GoldenError, GoldenResult};
-use crate::evrf::{eval_pad, public_inputs, Beta, SessionId};
+use crate::evrf::{eval_pad, Beta, SessionId};
+use crate::hash_to_curve::{h1, h2};
 use crate::schnorr::RegisteredKey;
 use crate::shamir;
 use crate::transcript::TranscriptExt;
 use crate::vss;
-use crate::zk::evrf_proof::{prove_evrf, verify_evrf, EvrfProof};
+use crate::zk::evrf_circuit::EvrfPeerInputs;
+use crate::zk::evrf_proof::{prove_evrf_batch, verify_evrf_batch, BatchPublicInputs, EvrfProof};
 use crate::zk::ZkParams;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::Zero;
@@ -64,15 +66,18 @@ impl DkgConfig {
     }
 }
 
-/// `(R_{ij}, z_{ij}, π_{ij})` — an encrypted share for one recipient.
+/// `(R_{ij}, z_{ij})` — an encrypted share for one recipient.
 #[derive(Clone, Debug)]
 pub struct ShareCiphertext {
     pub r_commit: GoutAffine,
     pub z: Fp,
-    pub proof: EvrfProof,
 }
 
-/// `(msg_i, C_i, {σ_{ij}})` — the broadcast message for one dealer.
+/// `(msg_i, C_i, {σ_{ij}}, π_i)` — the broadcast message for one dealer.
+///
+/// The `proof` is a *batched* eVRF proof covering all `n-1` recipients
+/// (Section 5.3 of the paper).  Recipients are ordered ascending by
+/// participant id (the same order as `ciphertexts` iterates).
 #[derive(Clone, Debug)]
 pub struct Dealing {
     pub dealer: u32,
@@ -80,6 +85,7 @@ pub struct Dealing {
     pub msg: [u8; 32],
     pub commitment: Vec<GoutAffine>,
     pub ciphertexts: BTreeMap<u32, ShareCiphertext>,
+    pub proof: EvrfProof,
 }
 
 /// State the dealer keeps secret — its own share and ω.
@@ -122,6 +128,8 @@ pub fn create_dealing(
     rng.fill(&mut msg);
 
     let mut ciphertexts = BTreeMap::new();
+    let mut peers = Vec::new();
+    let mut wits = Vec::new();
     let mut own_share = Fp::zero();
     for (j, x_ij) in &shares {
         if *j == me.id {
@@ -133,17 +141,27 @@ pub fn create_dealing(
             .ok_or_else(|| GoldenError::Internal(format!("recipient {} not in PKI", j)))?;
         let (pad, witness) = eval_pad(sk, pk_j, &cfg.sid, &msg, &cfg.beta);
         let z = pad.r + x_ij;
-        let pubs = public_inputs(&me.pk, pk_j, &cfg.sid, &msg, &cfg.beta, &pad.r_commit);
-        let proof = prove_evrf(zk, &cfg.sid, &pubs, &witness, rng)?;
         ciphertexts.insert(
             *j,
             ShareCiphertext {
                 r_commit: pad.r_commit,
                 z,
-                proof,
             },
         );
+        peers.push(EvrfPeerInputs {
+            pk2: *pk_j,
+            r_commit: pad.r_commit,
+        });
+        wits.push(witness);
     }
+    let pubs = BatchPublicInputs {
+        pk1: me.pk,
+        h1m: h1(&cfg.sid.0, &msg),
+        h2m: h2(&cfg.sid.0, &msg),
+        beta: cfg.beta.0,
+        peers,
+    };
+    let proof = prove_evrf_batch(zk, &cfg.sid, &pubs, &wits, rng)?;
     Ok((
         Dealing {
             dealer: me.id,
@@ -151,6 +169,7 @@ pub fn create_dealing(
             msg,
             commitment,
             ciphertexts,
+            proof,
         },
         DealingPrivate { own_share },
     ))
@@ -199,6 +218,7 @@ pub fn verify_dealing(
         .ok_or_else(|| GoldenError::Internal(format!("dealer {} not in PKI", j)))?;
     // The dealer must send exactly one ciphertext for every party except itself.
     let recipients: Vec<u32> = pki.keys().filter(|&&k| k != j).copied().collect();
+    let mut peers = Vec::with_capacity(recipients.len());
     for &k in &recipients {
         let ct = dealing
             .ciphertexts
@@ -207,7 +227,10 @@ pub fn verify_dealing(
                 dealer: j,
                 recipient: k,
             })?;
-        // Ciphertext consistency: g^z == R · X_{jk}
+        // Ciphertext consistency: g^z == R · X_{jk}.  This is the cheap
+        // public check from Figure 4 line 9 — perform it before the eVRF
+        // proof so a corrupted ciphertext is rejected without paying for the
+        // SNARK verification.
         let x_jk = vss::share_commitment(&dealing.commitment, k);
         let lhs = gout_mul(&ct.z);
         let rhs = (GoutProj::from(ct.r_commit) + GoutProj::from(x_jk)).into_affine();
@@ -217,16 +240,13 @@ pub fn verify_dealing(
                 recipient: k,
             });
         }
-        // eVRF proof.
         let pk_k = pki
             .get(&k)
             .ok_or_else(|| GoldenError::Internal(format!("recipient {} not in PKI", k)))?;
-        let pubs = public_inputs(pk_j, pk_k, &cfg.sid, &dealing.msg, &cfg.beta, &ct.r_commit);
-        verify_evrf(zk, &cfg.sid, &pubs, &ct.proof).map_err(|e| GoldenError::EvrfProofFailed {
-            dealer: j,
-            recipient: k,
-            reason: format!("{e}"),
-        })?;
+        peers.push(EvrfPeerInputs {
+            pk2: *pk_k,
+            r_commit: ct.r_commit,
+        });
     }
     // No spurious ciphertexts (e.g. for non-existent parties).
     for &k in dealing.ciphertexts.keys() {
@@ -237,6 +257,21 @@ pub fn verify_dealing(
             });
         }
     }
+    // Batched eVRF proof: one Bulletproofs proof for all `n-1` recipients.
+    let pubs = BatchPublicInputs {
+        pk1: *pk_j,
+        h1m: h1(&cfg.sid.0, &dealing.msg),
+        h2m: h2(&cfg.sid.0, &dealing.msg),
+        beta: cfg.beta.0,
+        peers,
+    };
+    verify_evrf_batch(zk, &cfg.sid, &pubs, &dealing.proof).map_err(|e| {
+        GoldenError::EvrfProofFailed {
+            dealer: j,
+            recipient: 0,
+            reason: format!("{e}"),
+        }
+    })?;
     Ok(())
 }
 

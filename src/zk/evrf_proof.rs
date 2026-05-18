@@ -1,27 +1,30 @@
 //! Public API for the `R_eVRF` zero-knowledge proof.
 //!
 //! Wraps the Bulletproofs R1CS prover/verifier and the eVRF circuit.  The
-//! pad commitment `R = g_out^r` is bound via a high-level Pedersen commitment
-//! with zero blinding (the linking trick).
+//! pad commitments `R_j = g_out^{r_j}` are bound via high-level Pedersen
+//! commitments with zero blinding (the linking trick).
 //!
-//! ## Soundness mode
+//! The proof is *batched* (Section 5.3): one Bulletproofs proof per dealer
+//! covers all `n-1` recipients, sharing the dealer's `sk` bit decomposition
+//! and `g_in^{sk}` gadget.  Verification likewise verifies all `n-1`
+//! relations with one MSM.
 //!
-//! The full circuit decomposes `sk` and `k` into 255 bits and performs four
-//! Jubjub scalar multiplications.  At ~22·255 ≈ 5600 multiplication gates,
-//! the prover is on the order of a second on a laptop.  For a quick smoke-test
-//! of the *protocol* without exercising the full ZK proof, set
-//! `ZkParams::insecure_quick()` which keeps the linking commitment `R = g_out^r`
-//! and replaces the rest of the circuit with a Schnorr proof of knowledge of
-//! `r` (no eVRF correctness — only that the dealer knows the pad).
-//! `insecure_quick()` is **not publicly verifiable** and must never be used
-//! outside tests/demos.
+//! ## Soundness modes
+//!
+//! * `ZkMode::Full` — the real Bulletproofs proof.  Publicly verifiable.
+//! * `ZkMode::InsecureQuick` — replaces the proof with a Schnorr PoK of each
+//!   `r_j` for `R_j = g_out^{r_j}`.  Proves only that the dealer *knows* the
+//!   pads, not that they were derived from the DH secret.  **Not publicly
+//!   verifiable**; only useful for fast tests of the protocol logic.
 
-use crate::curves::{gout_mul, Fp, GoutAffine, GoutProj};
+use crate::curves::{gout_mul, Fp, GinAffine, GoutAffine, GoutProj};
 use crate::errors::{GoldenError, GoldenResult};
-use crate::evrf::{EvrfPublicInputs, EvrfWitness, SessionId};
+use crate::evrf::{EvrfWitness, SessionId};
 use crate::transcript::TranscriptExt;
 use crate::zk::bp_r1cs::{Prover, R1CSProof, Verifier};
-use crate::zk::evrf_circuit::{build_circuit, default_lambda, gens_capacity};
+use crate::zk::evrf_circuit::{
+    batch_gens_capacity, build_batch_circuit, default_lambda, EvrfPeerInputs,
+};
 use crate::zk::generators::BpGens;
 use ark_ec::CurveGroup;
 use ark_ff::Zero;
@@ -36,39 +39,37 @@ pub struct ZkParams {
     pub mode: ZkMode,
     pub gens: Arc<BpGens>,
     pub lambda: usize,
+    /// The maximum number of recipients a single dealer may have to prove for.
+    /// `BpGens` are sized for `batch_gens_capacity(lambda, max_peers)`.
+    pub max_peers: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZkMode {
     /// Full Bulletproofs R1CS proof of `R_eVRF`.  Publicly verifiable.
     Full,
-    /// Schnorr proof of knowledge of `r` such that `R = g_out^r`, plus an
-    /// honest-prover stub for the rest.  **Not publicly verifiable** — only
-    /// use for fast iteration in tests/demos.
+    /// Schnorr proof of knowledge of `r_j`.  **Not publicly verifiable** —
+    /// only use for fast iteration in tests/demos.
     InsecureQuick,
 }
 
 impl ZkParams {
-    /// Set up the full proof system.  The first call hashes ~`16k` curve
-    /// points — call once and reuse.
-    pub fn full() -> Self {
-        let lambda = default_lambda();
-        let cap = gens_capacity(lambda);
-        Self {
-            mode: ZkMode::Full,
-            gens: Arc::new(BpGens::new(cap)),
-            lambda,
-        }
+    /// Set up the full proof system, sized for up to `max_peers` recipients
+    /// per dealing (i.e. `n-1`).  The first call hashes
+    /// `2·batch_gens_capacity(255, max_peers)` curve points — for `max_peers
+    /// = 4` that is ~32k points (~10 s); call once and reuse.
+    pub fn full(max_peers: usize) -> Self {
+        Self::with_lambda(default_lambda(), max_peers)
     }
-    /// A reduced-`λ` setup for fast tests.  Still a real Bulletproofs proof,
-    /// but the bit decompositions are shorter so a malicious prover with a
-    /// large `sk` could lie.  Use only when the test fixes `sk` to be small.
-    pub fn small_lambda(lambda: usize) -> Self {
-        let cap = gens_capacity(lambda);
+    /// `full()` with a custom `lambda` (bit decomposition width).  Use 255
+    /// for production; smaller for tests with bounded witnesses.
+    pub fn with_lambda(lambda: usize, max_peers: usize) -> Self {
+        let cap = batch_gens_capacity(lambda, max_peers.max(1));
         Self {
             mode: ZkMode::Full,
             gens: Arc::new(BpGens::new(cap)),
             lambda,
+            max_peers: max_peers.max(1),
         }
     }
     /// Schnorr-only mode for protocol smoke-tests.
@@ -77,16 +78,19 @@ impl ZkParams {
             mode: ZkMode::InsecureQuick,
             gens: Arc::new(BpGens::new(1)),
             lambda: 0,
+            max_peers: 0,
         }
     }
 }
 
-/// The proof object carried in a [`crate::dkg::Dealing`].
+/// The (batched) proof object carried in a [`crate::dkg::Dealing`].
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)] // `Full` carries ≈40 group elements; the box would only obscure things.
 pub enum EvrfProof {
     Full(R1CSProof),
-    InsecureQuick(SchnorrR),
+    /// Schnorr PoK of each `r_j` (one per recipient, in the same order as
+    /// the recipient list).
+    InsecureQuick(Vec<SchnorrR>),
 }
 
 /// Schnorr PoK of `r` for `R = g_out^r`, used by the `InsecureQuick` stub.
@@ -96,53 +100,99 @@ pub struct SchnorrR {
     pub response: Fp,
 }
 
+/// Public inputs for one batched proof — the dealer's `PK_1`, the eVRF base
+/// points `H_1, H_2`, `β`, and the per-recipient `(PK_j, R_j)`.
+#[derive(Clone, Debug)]
+pub struct BatchPublicInputs {
+    pub pk1: GinAffine,
+    pub h1m: GinAffine,
+    pub h2m: GinAffine,
+    pub beta: Fp,
+    pub peers: Vec<EvrfPeerInputs>,
+}
+
 /// Build a fresh transcript bound to all the public inputs.
-fn evrf_transcript(sid: &SessionId, pubs: &EvrfPublicInputs) -> Transcript {
-    let mut t = Transcript::new(b"golden-nidkg/evrf-proof/v1");
+fn batch_transcript(sid: &SessionId, pubs: &BatchPublicInputs) -> Transcript {
+    let mut t = Transcript::new(b"golden-nidkg/evrf-batch-proof/v1");
     t.append_bytes(b"sid", &sid.0);
     t.append_gin(b"PK1", &pubs.pk1);
-    t.append_gin(b"PK2", &pubs.pk2);
     t.append_gin(b"H1m", &pubs.h1m);
     t.append_gin(b"H2m", &pubs.h2m);
     t.append_fp(b"beta", &pubs.beta);
-    t.append_gout(b"R", &pubs.r_commit);
+    t.append_u64(b"n_peers", pubs.peers.len() as u64);
+    for p in &pubs.peers {
+        t.append_gin(b"PK2", &p.pk2);
+        t.append_gout(b"R", &p.r_commit);
+    }
     t
 }
 
-/// Generate a proof for the `R_eVRF` relation.
-pub fn prove_evrf(
+/// Generate a batched proof for the `R_eVRF` relation, covering all `peers`.
+///
+/// `wits` must be the same length and order as `pubs.peers`.
+pub fn prove_evrf_batch(
     params: &ZkParams,
     sid: &SessionId,
-    pubs: &EvrfPublicInputs,
-    wit: &EvrfWitness,
+    pubs: &BatchPublicInputs,
+    wits: &[EvrfWitness],
     rng: &mut impl Rng,
 ) -> GoldenResult<EvrfProof> {
-    debug_assert_eq!(
-        gout_mul(&wit.r),
-        pubs.r_commit,
-        "witness/commitment mismatch"
-    );
+    if wits.len() != pubs.peers.len() {
+        return Err(GoldenError::Internal(
+            "peers/witnesses length mismatch".into(),
+        ));
+    }
+    for (p, w) in pubs.peers.iter().zip(wits) {
+        debug_assert_eq!(gout_mul(&w.r), p.r_commit, "witness/commitment mismatch");
+    }
     match params.mode {
         ZkMode::InsecureQuick => {
-            let mut t = evrf_transcript(sid, pubs);
-            let k = Fp::rand(rng);
-            let commitment = gout_mul(&k);
-            t.append_gout(b"commit", &commitment);
-            let c = t.challenge_fp(b"c");
-            let response = k + c * wit.r;
-            Ok(EvrfProof::InsecureQuick(SchnorrR {
-                commitment,
-                response,
-            }))
+            let mut t = batch_transcript(sid, pubs);
+            let proofs = pubs
+                .peers
+                .iter()
+                .zip(wits)
+                .map(|(p, w)| {
+                    t.append_gout(b"Rj", &p.r_commit);
+                    let k = Fp::rand(rng);
+                    let commitment = gout_mul(&k);
+                    t.append_gout(b"commit", &commitment);
+                    let c = t.challenge_fp(b"c");
+                    SchnorrR {
+                        commitment,
+                        response: k + c * w.r,
+                    }
+                })
+                .collect();
+            Ok(EvrfProof::InsecureQuick(proofs))
         }
         ZkMode::Full => {
-            let t = evrf_transcript(sid, pubs);
-            let mut prover = Prover::new(&params.gens, t);
-            let (r_commit, r_var) = prover.commit(wit.r, Fp::zero());
-            if r_commit != pubs.r_commit {
-                return Err(GoldenError::Proof("R commitment mismatch".into()));
+            if pubs.peers.len() > params.max_peers {
+                return Err(GoldenError::Proof(format!(
+                    "{} peers > max_peers {}",
+                    pubs.peers.len(),
+                    params.max_peers
+                )));
             }
-            build_circuit(&mut prover, pubs, r_var, Some(wit), params.lambda);
+            let t = batch_transcript(sid, pubs);
+            let mut prover = Prover::new(&params.gens, t);
+            let mut r_vars = Vec::with_capacity(wits.len());
+            for w in wits {
+                let (r_commit, r_var) = prover.commit(w.r, Fp::zero());
+                debug_assert_eq!(r_commit, gout_mul(&w.r));
+                r_vars.push(r_var);
+            }
+            build_batch_circuit(
+                &mut prover,
+                &pubs.pk1,
+                &pubs.h1m,
+                &pubs.h2m,
+                pubs.beta,
+                &pubs.peers,
+                &r_vars,
+                Some(wits),
+                params.lambda,
+            );
             prover
                 .prove(rng)
                 .map(EvrfProof::Full)
@@ -151,35 +201,60 @@ pub fn prove_evrf(
     }
 }
 
-/// Verify a proof for the `R_eVRF` relation.
-pub fn verify_evrf(
+/// Verify a batched proof for the `R_eVRF` relation.
+pub fn verify_evrf_batch(
     params: &ZkParams,
     sid: &SessionId,
-    pubs: &EvrfPublicInputs,
+    pubs: &BatchPublicInputs,
     proof: &EvrfProof,
 ) -> GoldenResult<()> {
     match (params.mode, proof) {
-        (ZkMode::InsecureQuick, EvrfProof::InsecureQuick(p)) => {
-            let mut t = evrf_transcript(sid, pubs);
-            t.append_gout(b"commit", &p.commitment);
-            let c = t.challenge_fp(b"c");
-            // g^response == commit · R^c
-            let lhs = gout_mul(&p.response);
-            let rhs =
-                (GoutProj::from(p.commitment) + GoutProj::from(pubs.r_commit) * c).into_affine();
-            if lhs == rhs {
-                Ok(())
-            } else {
-                Err(GoldenError::Proof(
-                    "InsecureQuick Schnorr verification failed".into(),
-                ))
+        (ZkMode::InsecureQuick, EvrfProof::InsecureQuick(proofs)) => {
+            if proofs.len() != pubs.peers.len() {
+                return Err(GoldenError::Proof("peer count mismatch".into()));
             }
+            let mut t = batch_transcript(sid, pubs);
+            for (p, sp) in pubs.peers.iter().zip(proofs) {
+                t.append_gout(b"Rj", &p.r_commit);
+                t.append_gout(b"commit", &sp.commitment);
+                let c = t.challenge_fp(b"c");
+                let lhs = gout_mul(&sp.response);
+                let rhs =
+                    (GoutProj::from(sp.commitment) + GoutProj::from(p.r_commit) * c).into_affine();
+                if lhs != rhs {
+                    return Err(GoldenError::Proof(
+                        "InsecureQuick Schnorr verification failed".into(),
+                    ));
+                }
+            }
+            Ok(())
         }
         (ZkMode::Full, EvrfProof::Full(p)) => {
-            let t = evrf_transcript(sid, pubs);
+            if pubs.peers.len() > params.max_peers {
+                return Err(GoldenError::Proof(format!(
+                    "{} peers > max_peers {}",
+                    pubs.peers.len(),
+                    params.max_peers
+                )));
+            }
+            let t = batch_transcript(sid, pubs);
             let mut verifier = Verifier::new(&params.gens, t);
-            let r_var = verifier.commit(pubs.r_commit);
-            build_circuit(&mut verifier, pubs, r_var, None, params.lambda);
+            let r_vars: Vec<_> = pubs
+                .peers
+                .iter()
+                .map(|p| verifier.commit(p.r_commit))
+                .collect();
+            build_batch_circuit(
+                &mut verifier,
+                &pubs.pk1,
+                &pubs.h1m,
+                &pubs.h2m,
+                pubs.beta,
+                &pubs.peers,
+                &r_vars,
+                None,
+                params.lambda,
+            );
             verifier.verify(p).map_err(GoldenError::Proof)
         }
         _ => Err(GoldenError::Proof("proof/params mode mismatch".into())),
@@ -190,38 +265,56 @@ pub fn verify_evrf(
 mod tests {
     use super::*;
     use crate::curves::{gin_mul, Fs};
-    use crate::evrf::{eval_pad, public_inputs, Beta, SessionId};
+    use crate::evrf::{eval_pad, Beta, SessionId};
+    use crate::hash_to_curve::{h1, h2};
     use ark_std::UniformRand;
 
-    fn setup() -> (EvrfPublicInputs, EvrfWitness, SessionId) {
+    fn setup(n_peers: usize) -> (BatchPublicInputs, Vec<EvrfWitness>, SessionId) {
         let mut rng = ark_std::test_rng();
         let sk1 = Fs::rand(&mut rng);
         let pk1 = gin_mul(&sk1);
-        let sk2 = Fs::rand(&mut rng);
-        let pk2 = gin_mul(&sk2);
         let sid = SessionId([3u8; 32]);
         let beta = Beta::from_seed(b"test");
         let msg = b"msg";
-        let (out, wit) = eval_pad(&sk1, &pk2, &sid, msg, &beta);
-        (
-            public_inputs(&pk1, &pk2, &sid, msg, &beta, &out.r_commit),
-            wit,
-            sid,
-        )
+        let mut peers = Vec::new();
+        let mut wits = Vec::new();
+        for _ in 0..n_peers {
+            let sk2 = Fs::rand(&mut rng);
+            let pk2 = gin_mul(&sk2);
+            let (out, wit) = eval_pad(&sk1, &pk2, &sid, msg, &beta);
+            peers.push(EvrfPeerInputs {
+                pk2,
+                r_commit: out.r_commit,
+            });
+            wits.push(wit);
+        }
+        let pubs = BatchPublicInputs {
+            pk1,
+            h1m: h1(&sid.0, msg),
+            h2m: h2(&sid.0, msg),
+            beta: beta.0,
+            peers,
+        };
+        (pubs, wits, sid)
     }
 
     #[test]
     fn quick_proof_roundtrip() {
         let mut rng = ark_std::test_rng();
-        let (pubs, wit, sid) = setup();
+        let (pubs, wits, sid) = setup(3);
         let params = ZkParams::insecure_quick();
-        let proof = prove_evrf(&params, &sid, &pubs, &wit, &mut rng).unwrap();
-        verify_evrf(&params, &sid, &pubs, &proof).unwrap();
+        let proof = prove_evrf_batch(&params, &sid, &pubs, &wits, &mut rng).unwrap();
+        verify_evrf_batch(&params, &sid, &pubs, &proof).unwrap();
         // Tamper R.
         let mut bad = pubs.clone();
-        bad.r_commit = (GoutProj::from(bad.r_commit) + crate::curves::gout_gen()).into_affine();
-        assert!(verify_evrf(&params, &sid, &bad, &proof).is_err());
+        bad.peers[1].r_commit =
+            (GoutProj::from(bad.peers[1].r_commit) + crate::curves::gout_gen()).into_affine();
+        assert!(verify_evrf_batch(&params, &sid, &bad, &proof).is_err());
         // Wrong sid.
-        assert!(verify_evrf(&params, &SessionId([4u8; 32]), &pubs, &proof).is_err());
+        assert!(verify_evrf_batch(&params, &SessionId([4u8; 32]), &pubs, &proof).is_err());
+        // Drop a peer.
+        let mut bad = pubs.clone();
+        bad.peers.pop();
+        assert!(verify_evrf_batch(&params, &sid, &bad, &proof).is_err());
     }
 }

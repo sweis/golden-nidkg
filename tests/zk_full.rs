@@ -38,8 +38,12 @@ fn full_zk_round_trip() {
     let cfg = DkgConfig::new(n, t, sid);
 
     let zk_setup = Instant::now();
-    let zk = ZkParams::full();
-    eprintln!("ZK setup: {:?}", zk_setup.elapsed());
+    let zk = ZkParams::full((n - 1) as usize);
+    eprintln!(
+        "ZK setup: {:?} (cap = {})",
+        zk_setup.elapsed(),
+        zk.gens.gens_capacity
+    );
 
     let r0_start = Instant::now();
     let mut dealings = BTreeMap::new();
@@ -94,36 +98,54 @@ fn full_zk_round_trip() {
 fn full_zk_proof_binds_r() {
     use ark_ec::CurveGroup;
     use golden_nidkg::curves::{gin_mul, Fs, GoutProj};
-    use golden_nidkg::evrf::{eval_pad, public_inputs, Beta, SessionId};
-    use golden_nidkg::zk::evrf_proof::{prove_evrf, verify_evrf};
+    use golden_nidkg::evrf::{eval_pad, Beta, SessionId};
+    use golden_nidkg::hash_to_curve::{h1, h2};
+    use golden_nidkg::zk::evrf_circuit::EvrfPeerInputs;
+    use golden_nidkg::zk::evrf_proof::{prove_evrf_batch, verify_evrf_batch, BatchPublicInputs};
 
     let mut rng = StdRng::seed_from_u64(1);
-    let zk = ZkParams::full();
+    let zk = ZkParams::full(2);
     use ark_ff::UniformRand;
     let sk1 = Fs::rand(&mut rng);
     let pk1 = gin_mul(&sk1);
-    let sk2 = Fs::rand(&mut rng);
-    let pk2 = gin_mul(&sk2);
     let sid = SessionId([1u8; 32]);
     let beta = Beta::from_seed(b"test");
-    let (out, wit) = eval_pad(&sk1, &pk2, &sid, b"msg", &beta);
-    let pubs = public_inputs(&pk1, &pk2, &sid, b"msg", &beta, &out.r_commit);
-    let proof = prove_evrf(&zk, &sid, &pubs, &wit, &mut rng).unwrap();
-    verify_evrf(&zk, &sid, &pubs, &proof).unwrap();
+    let msg = b"msg";
+    let mut peers = Vec::new();
+    let mut wits = Vec::new();
+    for _ in 0..2 {
+        let sk2 = Fs::rand(&mut rng);
+        let pk2 = gin_mul(&sk2);
+        let (out, wit) = eval_pad(&sk1, &pk2, &sid, msg, &beta);
+        peers.push(EvrfPeerInputs {
+            pk2,
+            r_commit: out.r_commit,
+        });
+        wits.push(wit);
+    }
+    let pubs = BatchPublicInputs {
+        pk1,
+        h1m: h1(&sid.0, msg),
+        h2m: h2(&sid.0, msg),
+        beta: beta.0,
+        peers,
+    };
+    let proof = prove_evrf_batch(&zk, &sid, &pubs, &wits, &mut rng).unwrap();
+    verify_evrf_batch(&zk, &sid, &pubs, &proof).unwrap();
     // Tamper `R`.
     let mut bad = pubs.clone();
-    bad.r_commit = (GoutProj::from(bad.r_commit)
+    bad.peers[0].r_commit = (GoutProj::from(bad.peers[0].r_commit)
         + GoutProj::from(golden_nidkg::curves::gout_gen()))
     .into_affine();
-    assert!(verify_evrf(&zk, &sid, &bad, &proof).is_err());
+    assert!(verify_evrf_batch(&zk, &sid, &bad, &proof).is_err());
     // Wrong sender PK.
     let mut bad = pubs.clone();
     bad.pk1 = gin_mul(&Fs::rand(&mut rng));
-    assert!(verify_evrf(&zk, &sid, &bad, &proof).is_err());
+    assert!(verify_evrf_batch(&zk, &sid, &bad, &proof).is_err());
     // Wrong recipient PK.
     let mut bad = pubs.clone();
-    bad.pk2 = gin_mul(&Fs::rand(&mut rng));
-    assert!(verify_evrf(&zk, &sid, &bad, &proof).is_err());
+    bad.peers[1].pk2 = gin_mul(&Fs::rand(&mut rng));
+    assert!(verify_evrf_batch(&zk, &sid, &bad, &proof).is_err());
     // Wrong sid.
-    assert!(verify_evrf(&zk, &SessionId([2u8; 32]), &pubs, &proof).is_err());
+    assert!(verify_evrf_batch(&zk, &SessionId([2u8; 32]), &pubs, &proof).is_err());
 }

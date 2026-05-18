@@ -13,8 +13,14 @@ pub enum GoldenError {
     #[error("invalid share index (0 is reserved for the secret)")]
     InvalidShareIndex,
 
-    #[error("VSS commitment from dealer {dealer} has wrong length: got {got}, expected {expected}")]
-    WrongCommitmentLength { dealer: u32, got: usize, expected: usize },
+    #[error(
+        "VSS commitment from dealer {dealer} has wrong length: got {got}, expected {expected}"
+    )]
+    WrongCommitmentLength {
+        dealer: u32,
+        got: usize,
+        expected: usize,
+    },
 
     #[error("Schnorr PoK verification failed for party {party}")]
     SchnorrPoKFailed { party: u32 },
@@ -26,7 +32,11 @@ pub enum GoldenError {
     CiphertextCheckFailed { dealer: u32, recipient: u32 },
 
     #[error("eVRF proof failed: dealer {dealer} → recipient {recipient}: {reason}")]
-    EvrfProofFailed { dealer: u32, recipient: u32, reason: String },
+    EvrfProofFailed {
+        dealer: u32,
+        recipient: u32,
+        reason: String,
+    },
 
     #[error("dealer {dealer} did not send a ciphertext for recipient {recipient}")]
     MissingCiphertext { dealer: u32, recipient: u32 },

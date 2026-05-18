@@ -6,9 +6,9 @@
 //! and safe for the verifier to recompute.
 
 use crate::curves::{gout_gen, GoutAffine};
-use sha2::{Digest, Sha512};
-use ark_ff::PrimeField;
 use ark_ec::CurveGroup;
+use ark_ff::PrimeField;
+use sha2::{Digest, Sha512};
 
 /// Bulletproofs generator set.  `gens_capacity` is the maximum number of
 /// multiplication gates the proof can cover (must be a power of two).
@@ -28,7 +28,9 @@ pub struct BpGens {
 fn hash_to_gout_h2c(label: &[u8], i: u64) -> GoutAffine {
     // Real hash-to-G1 via the WB map (RFC 9380), so the dlog of the result is
     // unknown.  We use arkworks' built-in.
-    use ark_ec::hashing::{curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve};
+    use ark_ec::hashing::{
+        curve_maps::wb::WBMap, map_to_curve_hasher::MapToCurveBasedHasher, HashToCurve,
+    };
     use ark_ff::field_hashers::DefaultFieldHasher;
     type Hasher = MapToCurveBasedHasher<
         ark_bls12_381::G1Projective,
@@ -46,18 +48,36 @@ fn hash_to_gout_h2c(label: &[u8], i: u64) -> GoutAffine {
 impl BpGens {
     /// Create generators supporting up to `gens_capacity` multiplication gates.
     pub fn new(gens_capacity: usize) -> Self {
-        assert!(gens_capacity.is_power_of_two(), "gens_capacity must be a power of two");
+        assert!(
+            gens_capacity.is_power_of_two(),
+            "gens_capacity must be a power of two"
+        );
         // `B = g_out` (so V-commitments with zero blinding are bare `g_out^v`).
         let b = gout_gen();
         let b_blinding = hash_to_gout_h2c(b"B_blinding", 0);
-        let g_vec = (0..gens_capacity as u64).map(|i| hash_to_gout_h2c(b"G", i)).collect();
-        let h_vec = (0..gens_capacity as u64).map(|i| hash_to_gout_h2c(b"H", i)).collect();
-        Self { gens_capacity, b, b_blinding, g_vec, h_vec }
+        let g_vec = (0..gens_capacity as u64)
+            .map(|i| hash_to_gout_h2c(b"G", i))
+            .collect();
+        let h_vec = (0..gens_capacity as u64)
+            .map(|i| hash_to_gout_h2c(b"H", i))
+            .collect();
+        Self {
+            gens_capacity,
+            b,
+            b_blinding,
+            g_vec,
+            h_vec,
+        }
     }
 
     /// Slice the first `n` generators.
     pub fn share(&self, n: usize) -> (&[GoutAffine], &[GoutAffine]) {
-        assert!(n <= self.gens_capacity, "requested {} gens, have {}", n, self.gens_capacity);
+        assert!(
+            n <= self.gens_capacity,
+            "requested {} gens, have {}",
+            n,
+            self.gens_capacity
+        );
         (&self.g_vec[..n], &self.h_vec[..n])
     }
 }
@@ -72,7 +92,10 @@ pub struct PedersenGens {
 
 impl PedersenGens {
     pub fn new() -> Self {
-        Self { b: gout_gen(), b_blinding: hash_to_gout_h2c(b"B_blinding", 0) }
+        Self {
+            b: gout_gen(),
+            b_blinding: hash_to_gout_h2c(b"B_blinding", 0),
+        }
     }
     pub fn commit(&self, value: &crate::curves::Fp, blinding: &crate::curves::Fp) -> GoutAffine {
         use crate::curves::GoutProj;

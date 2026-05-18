@@ -10,7 +10,7 @@
 use crate::curves::{Fp, GoutAffine, GoutProj};
 use crate::transcript::TranscriptExt;
 use ark_ec::{CurveGroup, VariableBaseMSM};
-use ark_ff::{Field, Zero, One};
+use ark_ff::{Field, One, Zero};
 use merlin::Transcript;
 
 #[derive(Clone, Debug)]
@@ -114,7 +114,12 @@ impl InnerProductProof {
             h = h_new;
             len = half;
         }
-        InnerProductProof { l_vec, r_vec, a: a[0], b: b[0] }
+        InnerProductProof {
+            l_vec,
+            r_vec,
+            a: a[0],
+            b: b[0],
+        }
     }
 
     /// Compute the verification scalars `(u_i², u_i^{-2}, s_j)` for a proof
@@ -261,7 +266,8 @@ mod tests {
         let p = msm(&bases, &scalars).into_affine();
 
         let mut t1 = Transcript::new(b"ipa-test");
-        let proof = InnerProductProof::create(&mut t1, &q, &ones, &ones, &gens.g_vec, &gens.h_vec, &a, &b);
+        let proof =
+            InnerProductProof::create(&mut t1, &q, &ones, &ones, &gens.g_vec, &gens.h_vec, &a, &b);
         let mut t2 = Transcript::new(b"ipa-test");
         proof
             .verify(n, &mut t2, &ones, &ones, &p, &q, &gens.g_vec, &gens.h_vec)
@@ -269,7 +275,18 @@ mod tests {
         // Tampered P fails.
         let mut t3 = Transcript::new(b"ipa-test");
         let bad_p = (GoutProj::from(p) + GoutProj::from(q)).into_affine();
-        assert!(proof.verify(n, &mut t3, &ones, &ones, &bad_p, &q, &gens.g_vec, &gens.h_vec).is_err());
+        assert!(proof
+            .verify(
+                n,
+                &mut t3,
+                &ones,
+                &ones,
+                &bad_p,
+                &q,
+                &gens.g_vec,
+                &gens.h_vec
+            )
+            .is_err());
     }
 
     #[test]
@@ -299,10 +316,28 @@ mod tests {
         let p = msm(&bases, &scalars).into_affine();
 
         let mut t1 = Transcript::new(b"ipa-test2");
-        let proof = InnerProductProof::create(&mut t1, &q, &ones, &h_factors, &gens.g_vec, &gens.h_vec, &a, &b);
+        let proof = InnerProductProof::create(
+            &mut t1,
+            &q,
+            &ones,
+            &h_factors,
+            &gens.g_vec,
+            &gens.h_vec,
+            &a,
+            &b,
+        );
         let mut t2 = Transcript::new(b"ipa-test2");
         proof
-            .verify(n, &mut t2, &ones, &h_factors, &p, &q, &gens.g_vec, &gens.h_vec)
+            .verify(
+                n,
+                &mut t2,
+                &ones,
+                &h_factors,
+                &p,
+                &q,
+                &gens.g_vec,
+                &gens.h_vec,
+            )
             .unwrap();
     }
 }

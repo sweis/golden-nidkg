@@ -94,7 +94,9 @@ pub fn lagrange_coeff(idx: &[u32], i: u32, z: Fp) -> Fp {
         num *= z - xj;
         den *= xi - xj;
     }
-    num * den.inverse().expect("distinct indices ⇒ nonzero denominator")
+    num * den
+        .inverse()
+        .expect("distinct indices ⇒ nonzero denominator")
 }
 
 /// `Recover(t, shares)` — interpolate `f(0)` from `≥ t` shares with distinct

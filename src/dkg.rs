@@ -37,7 +37,7 @@ use crate::transcript::TranscriptExt;
 use crate::vss;
 use crate::zk::evrf_proof::{prove_evrf, verify_evrf, EvrfProof};
 use crate::zk::ZkParams;
-use ark_ec::CurveGroup;
+use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::Zero;
 use ark_std::rand::Rng;
 use ark_std::UniformRand;
@@ -55,7 +55,12 @@ pub struct DkgConfig {
 impl DkgConfig {
     pub fn new(n: u32, t: u32, sid: SessionId) -> Self {
         assert!(t >= 1 && t <= n, "require 1 ≤ t ≤ n");
-        Self { n, t, sid, beta: Beta::from_seed(b"golden-nidkg/beta/v1") }
+        Self {
+            n,
+            t,
+            sid,
+            beta: Beta::from_seed(b"golden-nidkg/beta/v1"),
+        }
     }
 }
 
@@ -105,7 +110,10 @@ pub fn create_dealing(
     omega: Option<Fp>,
 ) -> GoldenResult<(Dealing, DealingPrivate)> {
     if !pki.contains_key(&me.id) {
-        return Err(GoldenError::Internal(format!("dealer {} not in PKI", me.id)));
+        return Err(GoldenError::Internal(format!(
+            "dealer {} not in PKI",
+            me.id
+        )));
     }
     let omega = omega.unwrap_or_else(|| Fp::rand(rng));
     let (poly, shares) = shamir::share(omega, cfg.n, cfg.t, rng);
@@ -127,10 +135,23 @@ pub fn create_dealing(
         let z = pad.r + x_ij;
         let pubs = public_inputs(&me.pk, pk_j, &cfg.sid, &msg, &cfg.beta, &pad.r_commit);
         let proof = prove_evrf(zk, &cfg.sid, &pubs, &witness, rng)?;
-        ciphertexts.insert(*j, ShareCiphertext { r_commit: pad.r_commit, z, proof });
+        ciphertexts.insert(
+            *j,
+            ShareCiphertext {
+                r_commit: pad.r_commit,
+                z,
+                proof,
+            },
+        );
     }
     Ok((
-        Dealing { dealer: me.id, sid: cfg.sid, msg, commitment, ciphertexts },
+        Dealing {
+            dealer: me.id,
+            sid: cfg.sid,
+            msg,
+            commitment,
+            ciphertexts,
+        },
         DealingPrivate { own_share },
     ))
 }
@@ -182,13 +203,19 @@ pub fn verify_dealing(
         let ct = dealing
             .ciphertexts
             .get(&k)
-            .ok_or(GoldenError::MissingCiphertext { dealer: j, recipient: k })?;
+            .ok_or(GoldenError::MissingCiphertext {
+                dealer: j,
+                recipient: k,
+            })?;
         // Ciphertext consistency: g^z == R · X_{jk}
         let x_jk = vss::share_commitment(&dealing.commitment, k);
         let lhs = gout_mul(&ct.z);
         let rhs = (GoutProj::from(ct.r_commit) + GoutProj::from(x_jk)).into_affine();
         if lhs != rhs {
-            return Err(GoldenError::CiphertextCheckFailed { dealer: j, recipient: k });
+            return Err(GoldenError::CiphertextCheckFailed {
+                dealer: j,
+                recipient: k,
+            });
         }
         // eVRF proof.
         let pk_k = pki
@@ -204,7 +231,10 @@ pub fn verify_dealing(
     // No spurious ciphertexts (e.g. for non-existent parties).
     for &k in dealing.ciphertexts.keys() {
         if k == j || !pki.contains_key(&k) {
-            return Err(GoldenError::UnexpectedCiphertext { dealer: j, recipient: k });
+            return Err(GoldenError::UnexpectedCiphertext {
+                dealer: j,
+                recipient: k,
+            });
         }
     }
     Ok(())
@@ -229,10 +259,8 @@ pub fn complete(
     }
     let mut secret_share = own.own_share;
     let mut pk_proj = GoutProj::zero();
-    let mut pk_share_acc: BTreeMap<u32, GoutProj> = pki
-        .keys()
-        .map(|&l| (l, GoutProj::zero()))
-        .collect();
+    let mut pk_share_acc: BTreeMap<u32, GoutProj> =
+        pki.keys().map(|&l| (l, GoutProj::zero())).collect();
 
     for (j, dealing) in dealings {
         if *j != me.id {
@@ -242,12 +270,18 @@ pub fn complete(
             let ct = dealing
                 .ciphertexts
                 .get(&me.id)
-                .ok_or(GoldenError::MissingCiphertext { dealer: *j, recipient: me.id })?;
+                .ok_or(GoldenError::MissingCiphertext {
+                    dealer: *j,
+                    recipient: me.id,
+                })?;
             // (Defensive) consistency: the broadcast R should match the locally
             // re-derived pad commitment.  If it doesn't, the dealer lied; the
             // public verification should already have caught this.
             if ct.r_commit != pad.r_commit {
-                return Err(GoldenError::CiphertextCheckFailed { dealer: *j, recipient: me.id });
+                return Err(GoldenError::CiphertextCheckFailed {
+                    dealer: *j,
+                    recipient: me.id,
+                });
             }
             secret_share += ct.z - pad.r;
         }
@@ -261,7 +295,11 @@ pub fn complete(
         .into_iter()
         .map(|(l, v)| (l, v.into_affine()))
         .collect();
-    Ok(DkgOutput { public_key, public_key_shares, secret_share })
+    Ok(DkgOutput {
+        public_key,
+        public_key_shares,
+        secret_share,
+    })
 }
 
 /// Sanity check: `g_out^{sk_i}` should match the per-party `PK_i` produced by
@@ -274,7 +312,12 @@ pub fn check_output(out: &DkgOutput, my_id: u32) -> bool {
 
 /// Build a deterministic `SessionId` for a fresh DKG run from public context.
 /// (Convenience helper; in production pull from a beacon.)
-pub fn derive_session_id(label: &[u8], n: u32, t: u32, pki: &BTreeMap<u32, GinAffine>) -> SessionId {
+pub fn derive_session_id(
+    label: &[u8],
+    n: u32,
+    t: u32,
+    pki: &BTreeMap<u32, GinAffine>,
+) -> SessionId {
     use merlin::Transcript;
     let mut tr = Transcript::new(b"golden-nidkg/session-id/v1");
     tr.append_bytes(b"label", label);

@@ -6,10 +6,12 @@
 //! adversary register an honest party's `PK` as its own and recover that
 //! party's secret contribution from the broadcast transcript.
 
-use crate::curves::{gin_gen, GinAffine, GinProj, Fs};
+use crate::curves::{Fs, GinAffine, GinProj};
 use crate::errors::{GoldenError, GoldenResult};
 use crate::transcript::TranscriptExt;
-use ark_ec::{AffineRepr, CurveGroup};
+#[allow(unused_imports)]
+use ark_ec::AffineRepr;
+use ark_ec::{CurveGroup, PrimeGroup};
 use ark_std::rand::Rng;
 use ark_std::UniformRand;
 use merlin::Transcript;
@@ -38,7 +40,10 @@ impl SchnorrPoK {
         let commitment = (GinProj::generator() * k).into_affine();
         let c = challenge(id, pk, &commitment);
         let response = k + c * sk;
-        Self { commitment, response }
+        Self {
+            commitment,
+            response,
+        }
     }
 
     /// Verify against the (id, PK) the registrant claims.
@@ -118,7 +123,11 @@ mod tests {
         // themselves as party 2 must fail (BUGS.md §1).
         let mut rng = ark_std::test_rng();
         let (rk1, _) = RegisteredKey::fresh(1, &mut rng);
-        let stolen = RegisteredKey { id: 2, pk: rk1.pk, pok: rk1.pok.clone() };
+        let stolen = RegisteredKey {
+            id: 2,
+            pk: rk1.pk,
+            pok: rk1.pok.clone(),
+        };
         assert!(stolen.verify().is_err());
     }
 

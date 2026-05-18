@@ -13,7 +13,10 @@ use ark_ff::Field;
 /// `C = (g_out^{a_0}, …, g_out^{a_{t-1}})`.
 pub fn commit(poly: &Polynomial) -> Vec<GoutAffine> {
     let g = GoutProj::generator();
-    poly.coeffs().iter().map(|c| (g * c).into_affine()).collect()
+    poly.coeffs()
+        .iter()
+        .map(|c| (g * c).into_affine())
+        .collect()
 }
 
 /// `X_j = ∏_{l=0}^{t-1} A_l^{j^l} = g_out^{f(j)}`.

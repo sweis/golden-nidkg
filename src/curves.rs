@@ -20,11 +20,10 @@
 
 pub use ark_bls12_381::{Fr as Fp, G1Affine as GoutAffine, G1Projective as GoutProj};
 pub use ark_ed_on_bls12_381::{
-    EdwardsAffine as GinAffine, EdwardsProjective as GinProj, Fr as Fs,
-    JubjubConfig as GinConfig,
+    EdwardsAffine as GinAffine, EdwardsProjective as GinProj, Fr as Fs, JubjubConfig as GinConfig,
 };
 
-use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 
 /// `int(P.x)`: cast the affine x-coordinate of a `G_in` point into `F_p`.
@@ -109,7 +108,11 @@ mod tests {
         for _ in 0..50 {
             let p = (GinProj::generator() * Fs::rand(&mut rng)).into_affine();
             let neg = -p;
-            assert_ne!(x_coord(&p), x_coord(&neg), "P and -P must have distinct x on Jubjub");
+            assert_ne!(
+                x_coord(&p),
+                x_coord(&neg),
+                "P and -P must have distinct x on Jubjub"
+            );
         }
     }
 

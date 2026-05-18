@@ -20,11 +20,10 @@
 //! `π` is a Bulletproofs R1CS proof of `R_eVRF` (Figure 3) with `R` linked via
 //! a Pedersen commitment; see `zk/`.
 
-use crate::curves::{
-    fp_to_fs, gout_mul, x_coord, Fp, Fs, GinAffine, GinProj, GoutAffine,
-};
+use crate::curves::{fp_to_fs, gout_mul, x_coord, Fp, Fs, GinAffine, GinProj, GoutAffine};
 use crate::hash_to_curve::{h1, h2, hash_to_fp};
 use ark_ec::CurveGroup;
+use ark_ff::Zero;
 
 /// A session/CRS identifier.  Mixed into the eVRF hashes and the proof
 /// transcript so cross-session replay is impossible (BUGS.md §5).
@@ -103,7 +102,10 @@ pub fn eval_pad(
 ) -> (PadOutput, EvrfWitness) {
     // S = PK'^{sk}
     let s = (GinProj::from(*pk_other) * sk).into_affine();
-    debug_assert!(!s.x.is_zero() || !s.y.is_zero(), "PKI must reject identity keys");
+    debug_assert!(
+        !s.x.is_zero() || !s.y.is_zero(),
+        "PKI must reject identity keys"
+    );
     // k = int(S.x) reduced mod s
     let k0 = x_coord(&s);
     let k = fp_to_fs(&k0);
@@ -121,7 +123,16 @@ pub fn eval_pad(
     let r_commit = gout_mul(&r);
     (
         PadOutput { r, r_commit },
-        EvrfWitness { sk: *sk, s, k, t1, t2, r1, r2, r },
+        EvrfWitness {
+            sk: *sk,
+            s,
+            k,
+            t1,
+            t2,
+            r1,
+            r2,
+            r,
+        },
     )
 }
 

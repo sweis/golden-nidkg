@@ -149,6 +149,13 @@ fn cond_select<CS: ConstraintSystem>(
 
 /// Decompose a `ScalarVar` into `n_bits` little-endian boolean `ScalarVar`s.
 /// `n_bits` mul gates.  Caller must ensure `value < 2^n_bits`.
+///
+/// **⚠ Soundness caveat:** when `n_bits ≥ ⌈log₂ p⌉`, the constraint
+/// `Σ b_i 2^i ≡ value (mod p)` is satisfied by *every* integer
+/// `value + k·p < 2^{n_bits}`, so the bit pattern is ambiguous when
+/// `value < 2^{n_bits} − p`.  Use [`bit_decompose_canonical`] when the
+/// downstream circuit must use the *integer* value (e.g. as an exponent of a
+/// group whose order is not a multiple of `p`).
 pub fn bit_decompose<CS: ConstraintSystem>(
     cs: &mut CS,
     value: &ScalarVar,
@@ -176,6 +183,64 @@ pub fn bit_decompose<CS: ConstraintSystem>(
         });
     }
     cs.constrain(sum - value.lc.clone());
+    out
+}
+
+/// Like [`bit_decompose`], but additionally constrains the *integer* bit sum
+/// to be `< p` (the constraint field modulus), making the bit pattern
+/// canonical.  Adds ≈`n_bits` mul gates for a chained `MSB→LSB` comparison.
+///
+/// This is required when the bits are subsequently used as an integer
+/// exponent in a group whose order is *not* a multiple of `p` — otherwise a
+/// malicious prover can use the non-canonical representation `value + p`
+/// (when `value < 2^{n_bits} − p`) and prove a different result.  See
+/// `BUGS.md §10` for the protocol-level implication.
+pub fn bit_decompose_canonical<CS: ConstraintSystem>(
+    cs: &mut CS,
+    value: &ScalarVar,
+    n_bits: usize,
+) -> Vec<ScalarVar> {
+    let bits = bit_decompose(cs, value, n_bits);
+    // Chained MSB→LSB comparison against `p`.  Maintain
+    //   eq[i] = 1 iff bits[i..n] == p[i..n]
+    //   gt[i] = 1 iff bits[i..n]  > p[i..n]
+    // and constrain `gt[0] + eq[0] == 0` (i.e. sum < p).  Both are boolean and
+    // mutually exclusive, so `+` is safe.
+    let p_bits = fp_to_bits_le(&(-Fp::one()), n_bits); // p − 1's bits, but we want p's:
+    let p_bits = increment_bits(&p_bits); // p = (p − 1) + 1.
+    let mut eq = ScalarVar::constant(Fp::one());
+    let mut gt = ScalarVar::constant(Fp::zero());
+    for i in (0..n_bits).rev() {
+        let bi = &bits[i];
+        // t = eq · b_i  — one mul gate per bit.
+        let t = mul(cs, &eq, bi);
+        if p_bits[i] {
+            // p[i] = 1: cannot have b_i > p_i; eq stays only if b_i = 1.
+            eq = t;
+        } else {
+            // p[i] = 0: b_i = 1 ⇒ greater; eq stays only if b_i = 0.
+            gt = gt.add(&t);
+            eq = eq.sub(&t);
+        }
+    }
+    cs.constrain(gt.lc + eq.lc);
+    bits
+}
+
+/// `p − 1` is the largest field element; `p` is `(p − 1) + 1` as an integer
+/// (which overflows the field).  This adds 1 to a little-endian bit vector.
+fn increment_bits(bits: &[bool]) -> Vec<bool> {
+    let mut out = bits.to_vec();
+    let mut carry = true;
+    for b in out.iter_mut() {
+        let nb = *b ^ carry;
+        carry &= *b;
+        *b = nb;
+    }
+    debug_assert!(
+        !carry,
+        "overflow incrementing p-1 → would need n_bits+1 bits"
+    );
     out
 }
 
@@ -488,6 +553,39 @@ mod tests {
         };
         bit_decompose(&mut verifier, &svar, 8);
         verifier.verify(&proof).unwrap();
+    }
+
+    #[test]
+    fn bit_decompose_canonical_gadget() {
+        // Random `Fp` values must satisfy the `< p` constraint.  Exercises
+        // the chained MSB→LSB comparison.
+        let mut rng = ark_std::test_rng();
+        let gens = BpGens::new(1024);
+        for v in [
+            Fp::from(0u64),
+            Fp::from(1u64),
+            -Fp::one(),
+            Fp::rand(&mut rng),
+            Fp::rand(&mut rng),
+        ] {
+            let mut prover = Prover::new(&gens, Transcript::new(b"test"));
+            let (vc, vv) = prover.commit(v, Fp::rand(&mut rng));
+            let svar = ScalarVar {
+                lc: LinearCombination::from(vv),
+                w: Some(v),
+            };
+            bit_decompose_canonical(&mut prover, &svar, 255);
+            let proof = prover.prove(&mut rng).unwrap();
+
+            let mut verifier = Verifier::new(&gens, Transcript::new(b"test"));
+            let vv = verifier.commit(vc);
+            let svar = ScalarVar {
+                lc: LinearCombination::from(vv),
+                w: None,
+            };
+            bit_decompose_canonical(&mut verifier, &svar, 255);
+            verifier.verify(&proof).unwrap();
+        }
     }
 
     #[test]

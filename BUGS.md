@@ -226,6 +226,58 @@ explicitly absorbed into the LHL bound; for Jubjub-over-BLS12-381 they are
 
 ---
 
+## 10. `int(·)` casts inside `R_eVRF` need *canonical* bit decomposition —
+    **a soundness pitfall the paper should flag explicitly**
+
+`R_eVRF` step 3 (`k = int(S.x)`) and steps 4–5 (`T_i = H_i(msg)^k`) require
+the prover to decompose `k` into bits and run a bit-controlled scalar
+multiplication.  The naive bit-decomposition gadget enforces only
+
+```text
+  Σ_{i<λ} b_i 2^i ≡ k  (mod p)        with   b_i (1 − b_i) = 0.
+```
+
+For `λ ≥ ⌈log₂ p⌉`, this is satisfied by both the *integer* `k` **and**
+`k + p` whenever `k + p < 2^λ` — i.e. whenever `k < 2^λ − p`.  For
+`λ = 255` and `p` the BLS12-381 scalar-field prime, this is `k < 2^{251.6}`
+— roughly `1/8` of all `k` values.
+
+The two integers `k` and `k + p` reduce *differently* modulo `s` (the embedded
+curve's prime order, since `p ≢ 0 (mod s)`), so `H_i(msg)^k ≠ H_i(msg)^{k+p}`
+and the derived pads `r ≠ r'` differ.  A malicious dealer can therefore:
+
+1. Find a recipient with `S.x < 2^λ − p` (1-in-8; or grind `sk^I` against a
+   target recipient's already-published key, ≈8 keygen attempts).
+2. Use the non-canonical bits in the proof and compute the *wrong* pad `r'`.
+3. Commit `R = g_out^{r'}` and broadcast `z = r' + share`.
+4. Both checks pass: `g^{z} = R · X` and the eVRF proof.
+
+The recipient re-derives the *canonical* `r` and decrypts to a wrong share.
+**Public verification accepts a dealing that the recipient cannot decrypt
+correctly** — exactly what public verifiability is supposed to prevent.
+
+The paper's Section 4.5 cost table lists "bit-decomposition gadget: `λ + 2`
+constraints per decomposition".  If `+2` is just the recombination + sum
+constraint, the canonicity check is missing and this is a genuine bug.  If
+`+2` is shorthand for a strict-comparison gadget, that should be stated and
+the constraint count is too low (a chained `MSB→LSB < p` comparison costs
+`≈ λ` extra).
+
+This implementation adds [`bit_decompose_canonical`] which constrains the
+*integer* sum to be `< p` (≈`λ` extra mul gates).  It is applied to the
+`k = S.x` decomposition.  The dealer's `sk` decomposition does *not* need it:
+that decomposition's sum is constrained only via `g_in^{Σ b_i 2^i} = PK_1`,
+and any of the ≈8 valid integer representatives `{log PK_1 + j·s}` produce
+identical group elements for every embedded-curve exponentiation in the
+circuit.
+
+There is a defence-in-depth check in `dkg::complete` that detects a wrong
+`R_jk` locally (recipient re-derives the pad commitment), so the recipient
+can blame the dealer — but this is a *complaint*, not the public verification
+the paper is selling.
+
+---
+
 ## 9. Performance table — initially looked off, now understood (resolved)
 
 The summary's Table 2 (Section 5.3) lists "comm. (unopt.) 3.7 MB" for `n=50`

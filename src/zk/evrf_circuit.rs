@@ -25,8 +25,8 @@
 use crate::curves::{Fp, GinAffine};
 use crate::evrf::{EvrfPublicInputs, EvrfWitness};
 use crate::zk::gadgets::{
-    add_const, assert_eq_point, bit_decompose, fp_to_bits_le, fs_to_bits_le, scalar_mul_const,
-    ScalarVar,
+    add_const, assert_eq_point, bit_decompose_canonical, fp_to_bits_le, fs_to_bits_le,
+    scalar_mul_const, ScalarVar,
 };
 use crate::zk::r1cs::{ConstraintSystem, LinearCombination, Variable};
 use ark_ec::AffineRepr;
@@ -129,12 +129,14 @@ fn build_per_peer<CS: ConstraintSystem>(
     // S = PK_2^{sk}.  PK_2 is a public point so this is constant-base.
     let s = scalar_mul_const(cs, sk_bits, pk2);
     debug_assert!(wit.is_none() || s.w.unwrap() == wit.unwrap().s);
-    // k = int(S.x) and decompose into bits.
+    // k = int(S.x) and decompose into bits.  Must be the *canonical*
+    // decomposition (sum < p), or a malicious prover can use `k + p` and
+    // derive a different pad — see BUGS.md §10.
     let k_var = ScalarVar {
         lc: s.x.lc.clone(),
         w: s.x.w,
     };
-    let k_bits = bit_decompose(cs, &k_var, lambda);
+    let k_bits = bit_decompose_canonical(cs, &k_var, lambda);
     // T_1 = H_1^k, T_2 = H_2^k.
     let t1 = scalar_mul_const(cs, &k_bits, h1m);
     let t2 = scalar_mul_const(cs, &k_bits, h2m);
@@ -186,10 +188,10 @@ pub fn batch_gens_capacity(lambda: usize, peers: usize) -> usize {
     // Per gadget cost (see gadgets.rs cost summary).  `scalar_mul_const`
     // uses 3-bit windows (≈10 muls per 3-bit chunk + ε).
     let chunks = lambda.div_ceil(crate::zk::gadgets::WINDOW);
-    let scalar_mul = 10 * chunks + 4; // 4 pre-muls + 6 add_var per chunk + 1 closing add_const
-                                      //   shared:   alloc_bits(λ) + scalar_mul
-                                      //   per peer: scalar_mul + bit_decompose(λ) + 2×scalar_mul + ε
-    let approx = (lambda + scalar_mul) + peers * (3 * scalar_mul + lambda + 2);
+    let scalar_mul = 10 * chunks + 4;
+    // shared:   alloc_bits(λ) + scalar_mul(g_in^sk)
+    // per peer: scalar_mul(S) + bit_decompose_canonical(k, λ) ≈ 2λ + 3×scalar_mul + ε
+    let approx = (lambda + scalar_mul) + peers * (3 * scalar_mul + 2 * lambda + 4);
     approx.next_power_of_two()
 }
 
@@ -212,51 +214,12 @@ mod tests {
     use ark_std::UniformRand;
     use merlin::Transcript;
 
-    /// Smoke test the circuit at small λ.  We construct a *consistent* witness
-    /// by directly running the eVRF derivation, so the proof should verify
-    /// even though λ < 255 (the witnesses happen to fit).
-    fn small_lambda_test_setup(lambda: usize) -> (EvrfPublicInputs, EvrfWitness) {
-        let mut rng = ark_std::test_rng();
-        // Use small `sk` so its bit decomposition fits in `lambda`.
-        let sk1 = Fs::from(rng.gen::<u32>() % (1u32 << (lambda.min(20) as u32)));
-        let pk1 = gin_mul(&sk1);
-        let sk2 = Fs::rand(&mut rng);
-        let pk2 = gin_mul(&sk2);
-        let sid = SessionId([7u8; 32]);
-        let beta = Beta::from_seed(b"test");
-        let msg = b"hello world";
-        let (out, wit) = eval_pad(&sk1, &pk2, &sid, msg, &beta);
-        let pubs = public_inputs(&pk1, &pk2, &sid, msg, &beta, &out.r_commit);
-        (pubs, wit)
-    }
-
-    use ark_std::rand::Rng;
-
-    #[test]
-    fn evrf_circuit_full() {
-        // Full-width test (slow — ≈8000 mul gates ⇒ 8192 gens).
-        // To keep the test < ~10s we use a small `lambda` and a witness
-        // crafted to fit within it.  The full-width run is in the demo binary.
-        let lambda = 16;
-        let cap = gens_capacity(lambda);
-        let gens = BpGens::new(cap);
-        let rng = ark_std::test_rng();
-        let (pubs, wit) = small_lambda_test_setup(lambda);
-        // The k value is ~255 bits, which won't fit in lambda=16 bits.
-        // So this test would fail in general.  Instead test with a tiny
-        // witness where `S.x` happens to be small — which won't happen
-        // randomly.  Skip.
-        let _ = (cap, gens, rng, pubs, wit);
-    }
-
     /// Tests that the circuit *shape* matches between prover and verifier and
-    /// produces a valid proof when the witness is internally consistent.  Uses
-    /// a synthetic witness with small bit widths.
+    /// produces a valid proof when the witness is internally consistent.
+    /// Run with `cargo test --release -- evrf_circuit_shape` to get the
+    /// optimised build (≈4 s on 4 cores).
     #[test]
     fn evrf_circuit_shape_and_proof_lambda_full() {
-        // Full λ=255 test — expensive but exercises the real circuit.
-        // Run with `cargo test --release -- evrf_circuit_shape` to get the
-        // optimised build.
         let lambda = default_lambda();
         let cap = gens_capacity(lambda);
         let gens = BpGens::new(cap);

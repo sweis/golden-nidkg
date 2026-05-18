@@ -207,21 +207,22 @@ pub fn add_const<CS: ConstraintSystem>(cs: &mut CS, p: &PointVar, q: &GinAffine)
     }
 }
 
-/// `out = P + Q` for a variable `Q`.  8 mul gates.
+/// `out = P + Q` for a variable `Q`.  6 mul gates (Karatsuba on the
+/// cross-products: `x1·y2 + y1·x2 = (x1+y1)(x2+y2) − x1x2 − y1y2`).
 pub fn add_var<CS: ConstraintSystem>(cs: &mut CS, p: &PointVar, q: &PointVar) -> PointVar {
     let a = JubjubConfig::COEFF_A;
     let d = JubjubConfig::COEFF_D;
     let x1x2 = mul(cs, &p.x, &q.x);
     let y1y2 = mul(cs, &p.y, &q.y);
-    let x1y2 = mul(cs, &p.x, &q.y);
-    let y1x2 = mul(cs, &p.y, &q.x);
+    let xy12 = mul(cs, &p.x.add(&p.y), &q.x.add(&q.y));
+    // x1·y2 + y1·x2 = (x1 + y1)(x2 + y2) − x1·x2 − y1·y2.
+    let cross = xy12.sub(&x1x2).sub(&y1y2);
     let t = mul(cs, &x1x2, &y1y2);
     let dt = t.scale(d);
     let den_x = dt.shift(Fp::one());
     let den_y = dt.scale(-Fp::one()).shift(Fp::one());
-    let num_x = x1y2.add(&y1x2);
     let num_y = y1y2.sub(&x1x2.scale(a));
-    let x3 = div(cs, &num_x, &den_x);
+    let x3 = div(cs, &cross, &den_x);
     let y3 = div(cs, &num_y, &den_y);
     let pq_w =
         p.w.zip(q.w)
@@ -277,7 +278,7 @@ pub fn assert_eq_point<CS: ConstraintSystem>(cs: &mut CS, p: &PointVar, q: &GinA
 /// `out = acc_λ − O`.  (Twisted Edwards complete addition tolerates the
 /// identity, but an offset gives a clean accumulator and one consistent code
 /// path; the cost is a single extra `add_const` at the end.)
-pub fn scalar_mul_const<CS: ConstraintSystem>(
+pub fn scalar_mul_const_naive<CS: ConstraintSystem>(
     cs: &mut CS,
     bits: &[ScalarVar],
     base: &GinAffine,
@@ -290,6 +291,118 @@ pub fn scalar_mul_const<CS: ConstraintSystem>(
         q = (GinProj::from(q).double()).into_affine();
     }
     add_const(cs, &acc, &(-offset))
+}
+
+/// Window size in bits for [`scalar_mul_const`].  `3` is the sweet spot for
+/// Jubjub (≈3.3 mul gates per bit).
+pub const WINDOW: usize = 3;
+
+/// `out = ⟨bits, [B, 2B, 4B, …]⟩` via 3-bit windows + 8-entry lookup table.
+/// `≈ ⌈n/3⌉ · (4 + 6) + 3 ≈ 3.4·n` mul gates.
+///
+/// Each chunk of 3 bits selects one of `{0, 2^{3i}B, 2·2^{3i}B, …, 7·2^{3i}B}`
+/// via multilinear interpolation, then adds it to the accumulator with the
+/// 6-mul Karatsuba `add_var`.  Twisted-Edwards complete addition handles the
+/// identity (when all 3 bits are 0) without a special case.
+pub fn scalar_mul_const<CS: ConstraintSystem>(
+    cs: &mut CS,
+    bits: &[ScalarVar],
+    base: &GinAffine,
+) -> PointVar {
+    let offset = offset_point();
+    let mut acc = PointVar::constant(&offset);
+    // Window base for chunk `i` is `2^{WINDOW·i}·B`.
+    let mut chunk_base = GinProj::from(*base);
+    for chunk in bits.chunks(WINDOW) {
+        let table = build_table(&chunk_base, chunk.len());
+        let q = lookup(cs, chunk, &table);
+        acc = add_var(cs, &acc, &q);
+        for _ in 0..chunk.len() {
+            chunk_base.double_in_place();
+        }
+    }
+    add_const(cs, &acc, &(-offset))
+}
+
+/// 2^k-entry table `{0·B, 1·B, …, (2^k-1)·B}`.
+fn build_table(base: &GinProj, k: usize) -> Vec<GinAffine> {
+    let n = 1usize << k;
+    let mut out = Vec::with_capacity(n);
+    let mut acc = GinProj::default();
+    for _ in 0..n {
+        out.push(acc.into_affine());
+        acc += base;
+    }
+    out
+}
+
+/// Multilinear lookup of `table[∑ b_i 2^i]`.  Cost `2^k − k − 1` mul gates
+/// for the monomial pre-products (`2^k = table.len()`); the lookup itself is
+/// linear in those monomials.
+fn lookup<CS: ConstraintSystem>(cs: &mut CS, bits: &[ScalarVar], table: &[GinAffine]) -> PointVar {
+    let k = bits.len();
+    debug_assert_eq!(table.len(), 1usize << k);
+    // Build monomial products `m[S] = ∏_{j ∈ S} b_j`, `S ⊆ {0..k}`, indexed
+    // by the bitmask of `S`.  `m[0] = 1`, `m[2^j] = b_j`, others by 1 mul.
+    let mut mono: Vec<ScalarVar> = Vec::with_capacity(1 << k);
+    mono.push(ScalarVar::constant(Fp::one()));
+    for s in 1usize..(1 << k) {
+        if s.is_power_of_two() {
+            mono.push(bits[s.trailing_zeros() as usize].clone());
+        } else {
+            // Split off the low bit: m[S] = b_lo · m[S \ {lo}].
+            let lo = s.trailing_zeros() as usize;
+            let rest = s & (s - 1);
+            mono.push(mul(cs, &bits[lo], &mono[rest]));
+        }
+    }
+    // Multilinear interpolation coefficients α_S = Σ_{T ⊆ S} (−1)^{|S|−|T|} table[T].coord.
+    let coeff = |coord: &dyn Fn(&GinAffine) -> Fp| -> Vec<Fp> {
+        let mut alpha = vec![Fp::zero(); 1 << k];
+        for s in 0usize..(1 << k) {
+            // Subset-sum / Möbius: α_S = Σ_{T ⊆ S} (−1)^{|S \ T|} f(T).
+            let mut t = s;
+            loop {
+                let sign = if ((s ^ t).count_ones()) % 2 == 0 {
+                    Fp::one()
+                } else {
+                    -Fp::one()
+                };
+                alpha[s] += sign * coord(&table[t]);
+                if t == 0 {
+                    break;
+                }
+                t = (t - 1) & s;
+            }
+        }
+        alpha
+    };
+    // The identity `(0, 1)` has y-coordinate `1`, and `table[0] = identity`.
+    let alpha_x = coeff(&|p: &GinAffine| if p.is_zero() { Fp::zero() } else { p.x });
+    let alpha_y = coeff(&|p: &GinAffine| if p.is_zero() { Fp::one() } else { p.y });
+    // q.x = Σ alpha_x[S] · mono[S], q.y = Σ alpha_y[S] · mono[S].
+    let mut x_lc = LinearCombination::zero();
+    let mut y_lc = LinearCombination::zero();
+    let mut x_w = Some(Fp::zero());
+    let mut y_w = Some(Fp::zero());
+    for s in 0usize..(1 << k) {
+        x_lc = x_lc + mono[s].lc.clone() * alpha_x[s];
+        y_lc = y_lc + mono[s].lc.clone() * alpha_y[s];
+        x_w = x_w.zip(mono[s].w).map(|(a, b)| a + alpha_x[s] * b);
+        y_w = y_w.zip(mono[s].w).map(|(a, b)| a + alpha_y[s] * b);
+    }
+    let q_w = x_w.zip(y_w).map(|(x, y)| {
+        if x == Fp::zero() && y == Fp::one() {
+            GinAffine::zero()
+        } else {
+            GinAffine::new_unchecked(x, y)
+        }
+    });
+    PointVar {
+        x: ScalarVar { lc: x_lc, w: x_w },
+        y: ScalarVar { lc: y_lc, w: y_w },
+        w: q_w,
+    }
 }
 
 /// Fixed offset point — an arbitrary non-identity prime-order Jubjub point.

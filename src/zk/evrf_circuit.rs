@@ -183,11 +183,13 @@ pub fn gens_capacity(lambda: usize) -> usize {
 /// Compute the gens capacity for a *batched* circuit covering `peers`
 /// recipients.
 pub fn batch_gens_capacity(lambda: usize, peers: usize) -> usize {
-    // Per gadget cost (see gadgets.rs cost summary):
-    //   shared:   alloc_bits(λ) + scalar_mul_const(λ) ≈ λ + (5λ+3) = 6λ + 3
-    //   per peer: scalar_mul_const + bit_decompose + 2×scalar_mul_const
-    //             ≈ (5λ+3) + λ + 2(5λ+3) ≈ 16λ + 9
-    let approx = (6 * lambda + 3) + peers * (16 * lambda + 9);
+    // Per gadget cost (see gadgets.rs cost summary).  `scalar_mul_const`
+    // uses 3-bit windows (≈10 muls per 3-bit chunk + ε).
+    let chunks = lambda.div_ceil(crate::zk::gadgets::WINDOW);
+    let scalar_mul = 10 * chunks + 4; // 4 pre-muls + 6 add_var per chunk + 1 closing add_const
+                                      //   shared:   alloc_bits(λ) + scalar_mul
+                                      //   per peer: scalar_mul + bit_decompose(λ) + 2×scalar_mul + ε
+    let approx = (lambda + scalar_mul) + peers * (3 * scalar_mul + lambda + 2);
     approx.next_power_of_two()
 }
 

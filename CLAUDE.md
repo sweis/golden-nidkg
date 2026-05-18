@@ -175,12 +175,18 @@ cargo run --release --example demo -- 5 3 quick     # protocol-only, no real ZK
   (zero blinding).  This is the trick from the eVRF paper that keeps the
   circuit at ~14λ constraints instead of doing non-native G_out arithmetic.
 * The Schnorr PoK *must* bind the registrant identity (and ideally a session
-  string) in the FS challenge — see BUGS.md item on key-duplication / x-coord
-  collisions.
-* Jubjub is a twisted Edwards curve; the affine "x" coordinate of a point is
-  unambiguous (no sign ambiguity per (x,y), but `(x,y)` and `(-x,y)` are distinct
-  points whose `x` differ).  Two points with the same `x` are `(x,y)` and `(x,-y)`
-  i.e. `P` and `-P`.  Same x-coordinate symmetry as in short-Weierstrass.
+  string) in the FS challenge — see BUGS.md §1 on key-duplication / replay.
+* Jubjub is a twisted Edwards curve.  Negation is `−(x,y) = (−x,y)`, so `.x`
+  is **injective on the prime-order subgroup**: `(x, y)` and `(x, −y)` differ
+  by the 2-torsion `(0, −1)`, which is not in the odd-order subgroup.  This is
+  *better* than short-Weierstrass where `.x` is 2-to-1 — see BUGS.md §2.
+* The `k = int(S.x)` bit decomposition must be **canonical** (`Σ b_i 2^i < p`).
+  A naive `≡ mod p` constraint admits `k + p`, which derives a *different*
+  pad from `k` and lets a malicious dealer pass public verification while the
+  recipient gets an undecryptable share.  This implementation adds a chained
+  `< p` comparison (`bit_decompose_canonical`).  See BUGS.md §10.  The `sk`
+  decomposition does *not* need it (any of its valid integer representatives
+  produce identical embedded-curve exponentiations).
 
 ## Reproducing the analysis / sources
 

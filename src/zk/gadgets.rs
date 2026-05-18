@@ -17,6 +17,7 @@
 //! | gadget                                | muls               |
 //! |---------------------------------------|--------------------|
 //! | `bit_decompose(λ)`                    | `λ`                |
+//! | `bit_decompose_canonical(λ)`          | `2λ`               |
 //! | `add_const`                           | 3                  |
 //! | `add_var` (Karatsuba cross-products)  | 6                  |
 //! | `cond_add_const`                      | 5 (= 3 + 2)        |
@@ -26,7 +27,7 @@
 //! The 3-bit window's per-chunk cost is `4` monomial pre-products + `6`
 //! `add_var` muls = `10` per `3` bits, ≈ `3.4` per bit.  This matches the
 //! paper's `3λ + 2` exponentiation gadget budget within a small constant.
-//! `R_eVRF` per-recipient is `≈ 3·(3.4λ) + λ ≈ 11λ`; the dealer's shared
+//! `R_eVRF` per-recipient is `≈ 3·(3.4λ) + 2λ ≈ 12λ`; the dealer's shared
 //! `g_in^{sk}` and `sk` decomposition adds `≈ 4.4λ` once.
 
 use crate::curves::{Fp, Fs, GinAffine, GinProj};

@@ -10,7 +10,9 @@
 
 use crate::curves::{Fp, GinAffine, GinProj};
 use ark_ec::twisted_edwards::TECurveConfig;
-use ark_ec::{AdditiveGroup, AffineRepr, CurveConfig, CurveGroup};
+#[allow(unused_imports)]
+use ark_ec::AffineRepr; // used in `is_zero()` and `is_on_curve()` only when debug_assertions
+use ark_ec::{AdditiveGroup, CurveConfig, CurveGroup};
 use ark_ed_on_bls12_381::JubjubConfig;
 use ark_ff::{Field, PrimeField};
 use sha2::{Digest, Sha512};

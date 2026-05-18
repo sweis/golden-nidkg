@@ -74,6 +74,14 @@ Round 1 (each party `i`):
   `R = g_out^r` by making `R` a "high-level" V-commitment with zero blinding.
   The circuit (over `F_p`) proves the rest of the eVRF computation natively
   (Jubjub scalar mults are over `F_p`).
+* **Why a hand-rolled Bulletproofs R1CS?** No published Rust Bulletproofs
+  library can produce R1CS proofs over BLS12-381 G1 (which is required because
+  Jubjub's base field is the BLS12-381 scalar field).  See `src/zk/mod.rs` for
+  the survey: `bulletproofs` (dalek) is Ristretto-only and its R1CS module is
+  broken in 5.x; `bulletproofs-bls` (zkcrypto) targets BLS12-381 but its
+  `yoloproofs` (R1CS) feature does not compile against any `blstrs_plus` /
+  `bls12_381_plus` version; `ark-bulletproofs` is secq256k1/Zorro.  The
+  ~600-line `bp_r1cs.rs` is a careful port of the dalek `yoloproofs` design.
 * **PKI registration**: Schnorr proof of knowledge of `sk_i^I` over Jubjub,
   with the prover identity bound into the Fiat-Shamir transcript (rogue-key
   & key-replay protection).

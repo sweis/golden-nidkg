@@ -694,4 +694,86 @@ mod tests {
         verifier.allocate_multiplier(None).unwrap();
         verifier.verify(&proof).unwrap();
     }
+
+    /// Tampering with each proof field individually must break verification.
+    #[test]
+    fn bp_r1cs_proof_malleability() {
+        let mut rng = ark_std::test_rng();
+        let gens = BpGens::new(8);
+        let (a, b, c, d) = (
+            Fp::from(3u64),
+            Fp::from(4u64),
+            Fp::from(5u64),
+            Fp::from(6u64),
+        );
+        let e = (a + b) * (c + d);
+        let blindings: Vec<Fp> = (0..5).map(|_| Fp::rand(&mut rng)).collect();
+        // Add a couple of extra mul gates so the IPA has > 1 round.
+        let extra_gadget = |cs: &mut dyn ConstraintSystem, va: Variable, vb: Variable| {
+            for _ in 0..3 {
+                cs.multiply(LinearCombination::from(va), LinearCombination::from(vb));
+            }
+        };
+        let mut prover = Prover::new(&gens, Transcript::new(b"m"));
+        let (va_c, va) = prover.commit(a, blindings[0]);
+        let (vb_c, vb) = prover.commit(b, blindings[1]);
+        let (vc_c, vc) = prover.commit(c, blindings[2]);
+        let (vd_c, vd) = prover.commit(d, blindings[3]);
+        let (ve_c, ve) = prover.commit(e, blindings[4]);
+        toy_gadget(&mut prover, va, vb, vc, vd, ve);
+        extra_gadget(&mut prover, va, vb);
+        let proof = prover.prove(&mut rng).unwrap();
+        assert!(!proof.ipp.l_vec.is_empty(), "IPA must have ≥1 round");
+
+        let verify = |p: &R1CSProof| -> bool {
+            let mut verifier = Verifier::new(&gens, Transcript::new(b"m"));
+            let va = verifier.commit(va_c);
+            let vb = verifier.commit(vb_c);
+            let vc = verifier.commit(vc_c);
+            let vd = verifier.commit(vd_c);
+            let ve = verifier.commit(ve_c);
+            toy_gadget(&mut verifier, va, vb, vc, vd, ve);
+            extra_gadget(&mut verifier, va, vb);
+            verifier.verify(p).is_ok()
+        };
+        assert!(verify(&proof));
+
+        let bump_pt = |p: &GoutAffine| (GoutProj::from(*p) + GoutProj::from(gens.b)).into_affine();
+        let bump_sc = |s: &Fp| *s + Fp::one();
+
+        macro_rules! tamper {
+            ($field:ident, $f:expr) => {{
+                let mut bad = proof.clone();
+                bad.$field = $f(&bad.$field);
+                assert!(
+                    !verify(&bad),
+                    concat!("tampered ", stringify!($field), " should be rejected")
+                );
+            }};
+        }
+        tamper!(a_i, bump_pt);
+        tamper!(a_o, bump_pt);
+        tamper!(s, bump_pt);
+        tamper!(t_1, bump_pt);
+        tamper!(t_3, bump_pt);
+        tamper!(t_4, bump_pt);
+        tamper!(t_5, bump_pt);
+        tamper!(t_6, bump_pt);
+        tamper!(t_x, bump_sc);
+        tamper!(t_x_blinding, bump_sc);
+        tamper!(e_blinding, bump_sc);
+        // IPA fields.
+        let mut bad = proof.clone();
+        bad.ipp.a += Fp::one();
+        assert!(!verify(&bad), "tampered IPA a should be rejected");
+        let mut bad = proof.clone();
+        bad.ipp.b += Fp::one();
+        assert!(!verify(&bad), "tampered IPA b should be rejected");
+        let mut bad = proof.clone();
+        bad.ipp.l_vec[0] = bump_pt(&bad.ipp.l_vec[0]);
+        assert!(!verify(&bad), "tampered IPA L should be rejected");
+        let mut bad = proof.clone();
+        bad.ipp.r_vec[0] = bump_pt(&bad.ipp.r_vec[0]);
+        assert!(!verify(&bad), "tampered IPA R should be rejected");
+    }
 }

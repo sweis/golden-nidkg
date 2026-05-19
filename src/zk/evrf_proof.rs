@@ -208,8 +208,8 @@ pub fn verify_evrf_batch(
     proof: &EvrfProof,
 ) -> GoldenResult<()> {
     match collect_evrf_check(params, sid, pubs, proof)? {
-        Some(check) => verify_batch(&params.gens, &[check], &mut ark_std::test_rng())
-            .map_err(GoldenError::Proof),
+        // A single check needs no random combiner — verify the MSM directly.
+        Some(check) => check.verify(&params.gens).map_err(GoldenError::Proof),
         None => Ok(()), // InsecureQuick — already verified inside collect.
     }
 }

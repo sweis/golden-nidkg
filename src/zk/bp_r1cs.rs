@@ -328,30 +328,10 @@ impl<'g> Verifier<'g> {
     }
 
     /// Verify a single proof.  Equivalent to `self.collect_check(proof)` then
-    /// running the resulting MSM.
+    /// [`VerificationCheck::verify`].
     pub fn verify(self, proof: &R1CSProof) -> Result<(), String> {
         let gens = self.gens;
-        let chk = self.collect_check(proof)?;
-        let n = chk.g_scalars.len();
-        let (g_vec, h_vec) = gens.share(n);
-        let cap = 2 * n + chk.extra_bases.len() + 2;
-        let mut bases = Vec::with_capacity(cap);
-        let mut scalars = Vec::with_capacity(cap);
-        bases.extend_from_slice(g_vec);
-        scalars.extend_from_slice(&chk.g_scalars);
-        bases.extend_from_slice(h_vec);
-        scalars.extend_from_slice(&chk.h_scalars);
-        bases.push(gens.b);
-        scalars.push(chk.b_scalar);
-        bases.push(gens.b_blinding);
-        scalars.push(chk.b_blinding_scalar);
-        bases.extend_from_slice(&chk.extra_bases);
-        scalars.extend_from_slice(&chk.extra_scalars);
-        if msm(&bases, &scalars).is_zero() {
-            Ok(())
-        } else {
-            Err("R1CS verification failed".into())
-        }
+        self.collect_check(proof)?.verify(gens)
     }
 
     /// Compute the verification MSM coefficients without running the MSM.
@@ -502,6 +482,34 @@ pub struct VerificationCheck {
     pub extra_bases: Vec<GoutAffine>,
     /// Scalars for `extra_bases`.
     pub extra_scalars: Vec<Fp>,
+}
+
+impl VerificationCheck {
+    /// Run the single-proof verification MSM `Σ c_j base_j == 0`.  Unlike
+    /// [`verify_batch`], this does **not** need a random combiner because
+    /// there is nothing to combine — a single check is verified directly.
+    pub fn verify(&self, gens: &BpGens) -> Result<(), String> {
+        let n = self.g_scalars.len();
+        let (g_vec, h_vec) = gens.share(n);
+        let cap = 2 * n + self.extra_bases.len() + 2;
+        let mut bases = Vec::with_capacity(cap);
+        let mut scalars = Vec::with_capacity(cap);
+        bases.extend_from_slice(g_vec);
+        scalars.extend_from_slice(&self.g_scalars);
+        bases.extend_from_slice(h_vec);
+        scalars.extend_from_slice(&self.h_scalars);
+        bases.push(gens.b);
+        scalars.push(self.b_scalar);
+        bases.push(gens.b_blinding);
+        scalars.push(self.b_blinding_scalar);
+        bases.extend_from_slice(&self.extra_bases);
+        scalars.extend_from_slice(&self.extra_scalars);
+        if msm(&bases, &scalars).is_zero() {
+            Ok(())
+        } else {
+            Err("R1CS verification failed".into())
+        }
+    }
 }
 
 /// Batch-verify several proofs by random linear combination.

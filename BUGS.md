@@ -11,8 +11,7 @@
 
 ---
 
-## 1. Identity binding in the PKI registration / key-uniqueness — **likely
-   underspecified, leads to a concrete share-recovery attack**
+## 1. Identity binding in the PKI registration / key-uniqueness — **likely underspecified, leads to a concrete share-recovery attack**
 
 Section 5.1 (per the third-party notes) requires that each party "prove
 knowledge of `sk_i^I` when registering" `PK_i^I` with the PKI.  That is the
@@ -59,8 +58,7 @@ This implementation binds the registrant identity into the PoK transcript
 
 ---
 
-## 2. x-coordinate symmetry in the eVRF / "negate-the-key" pad collision —
-   **curve-dependent — none on Jubjub-with-x, real on short Weierstrass**
+## 2. x-coordinate symmetry in the eVRF / "negate-the-key" pad collision — **curve-dependent — none on Jubjub-with-x, real on short Weierstrass**
 
 `R_eVRF` (Figure 3) computes `k = int(S.x)` where `S = PK_2^{sk_1}`.  Whether
 `P ↦ P.x` is injective on the prime-order subgroup of `E(F_p)` depends on the
@@ -96,8 +94,7 @@ more bits in the in-circuit decomposition.
 
 ---
 
-## 3. Min-entropy accounting for the leftover-hash-lemma extraction —
-   **needs DDH (not just CDH/"unrecoverability") for the second hop**
+## 3. Min-entropy accounting for the leftover-hash-lemma extraction — **needs DDH (not just CDH/"unrecoverability") for the second hop**
 
 The eVRF pad is `r = beta · int(T1.x) + int(T2.x)  (mod p)` where
 `T1 = H1(msg)^k`, `T2 = H2(msg)^k`, `k = int(S.x)`.
@@ -131,8 +128,7 @@ suffice — which they do not, on their own, for a `log p`-bit output.
 
 ---
 
-## 4. Missing "degree of the broadcast commitment" check in Round 1 — **likely
-   an editorial gap in Figure 4**
+## 4. Missing "degree of the broadcast commitment" check in Round 1 — **likely an editorial gap in Figure 4**
 
 Round 1 line 8 computes `X_{jk} = ∏_{l=0}^{t-1} A_{j,l}^{k^l}`.  The implicit
 assumption is `|C_j| = t`.  If a malicious dealer broadcasts a commitment
@@ -156,8 +152,7 @@ regression test (`tests/dkg.rs::wrong_degree_commitment_rejected`).
 
 ---
 
-## 5. eVRF inputs do not include a session identifier — **a concern for
-   refresh/reshare reuse, not the one-shot DKG**
+## 5. eVRF inputs do not include a session identifier — **a concern for refresh/reshare reuse, not the one-shot DKG**
 
 `eVRF.Evaluate(sk, (msg, PK'))` is keyed on `(msg, PK')`.  `msg` is a `λ`-bit
 nonce sampled by the *sender*.  There is no session id in the eVRF input.
@@ -182,8 +177,7 @@ hash domain and into the proof transcript).
 
 ---
 
-## 6. `Recover` is defined for an arbitrary set `C` but the DKG never re-runs
-   the consistency check on `|C| = t` — **minor / editorial**
+## 6. `Recover` is defined for an arbitrary set `C` but the DKG never re-runs the consistency check on `|C| = t` — **minor / editorial**
 
 Section 3.3's `Recover(t, {(i, x̄_i)})` interpolates with whichever set `C` of
 shares it is handed.  Given `> t` shares, it should either (a) take an
@@ -197,8 +191,7 @@ algorithm should at least assert `|C| ≥ t`.
 
 ---
 
-## 7. The `R = g_out^r` step is *outside* the in-circuit relation — make this
-   explicit when porting
+## 7. The `R = g_out^r` step is *outside* the in-circuit relation — make this explicit when porting
 
 Figure 3 step 9 says `R = g_out^r`, but the constraint count
 `14λ + 14 ≈ 3598` (for `λ=256`) does **not** budget a non-native G_out scalar
@@ -213,8 +206,7 @@ of the constraint system, which is a foot-gun.
 
 ---
 
-## 8. `int(·)` casts and modular reduction biases — **negligible but should be
-   stated**
+## 8. `int(·)` casts and modular reduction biases — **negligible but should be stated**
 
 `k = int(S.x)` interprets a base-field element of `F_p` as an integer in
 `[0, p)`.  The exponentiations `H_i(msg)^k` live in `G_in` of order `s < p`,
@@ -226,8 +218,7 @@ explicitly absorbed into the LHL bound; for Jubjub-over-BLS12-381 they are
 
 ---
 
-## 10. `int(·)` casts inside `R_eVRF` need *canonical* bit decomposition —
-    **a soundness pitfall the paper should flag explicitly**
+## 10. `int(·)` casts inside `R_eVRF` need *canonical* bit decomposition — **a soundness pitfall the paper should flag explicitly**
 
 `R_eVRF` step 3 (`k = int(S.x)`) and steps 4–5 (`T_i = H_i(msg)^k`) require
 the prover to decompose `k` into bits and run a bit-controlled scalar

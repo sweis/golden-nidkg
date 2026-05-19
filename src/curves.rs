@@ -84,13 +84,14 @@ pub fn gin_mul(s: &Fs) -> GinAffine {
 mod tests {
     use super::*;
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     #[test]
     fn jubjub_x_is_injective_on_prime_subgroup() {
         // The eVRF leans on `S.x` being an (almost) injective extraction.
         // For twisted Edwards with even cofactor, `(x, y)` and `(x, -y)` differ
         // by a 2-torsion point so they cannot both be in the odd-order subgroup.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         for _ in 0..50 {
             let p = (GinProj::generator() * Fs::rand(&mut rng)).into_affine();
             let neg = -p;

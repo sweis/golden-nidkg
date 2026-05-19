@@ -315,6 +315,65 @@ side-by-side and performance comparison.
 
 ---
 
+## 12. Subgroup membership of broadcast group elements — **implementation pitfall, not a paper bug**
+
+Figure 4 publishes group elements (`A_{j,l} ∈ G_out`, `R_{jk} ∈ G_out`,
+`PK_i^I ∈ G_in`) without specifying that the verifier must reject elements
+outside the prime-order subgroup.  This is invisible if the implementation
+deserialises group elements with a subgroup check (arkworks'
+`CanonicalDeserialize` does), but a foot-gun if it constructs them in place.
+
+* **`G_in` (Jubjub, cofactor 8).**  An adversary can grind the Schnorr
+  challenge `c` of the PKI PoK to a multiple of the small order so a key
+  `PK + L` (with `L ∈ E[8] \ G_in`) passes verification.  The DH shared
+  secret then differs between the two parties, so the recipient cannot
+  decrypt — a self-DOS rather than a forgery, but the public verification
+  cannot catch it.
+* **`G_out` (BLS12-381 G1, cofactor `3 · 11² · 10177² · 859267² · 52437899²`).**
+  The smallest prime factor is **3**.  A malicious dealer can publish
+  `A_{j,l} = G_l + L_l` and `R_{jk} = G + L'` with order-3 components chosen
+  so `g^z = R + X` still holds, and grind the eVRF Bulletproofs proof (≈3
+  re-runs) so the residual small-order term in the verification MSM
+  vanishes.  Public verification then accepts the dealing.  The recipient's
+  re-derived `R' = g_out^r` is in the prime-order subgroup, so `R ≠ R'` and
+  the recipient raises a *complaint that public verification considers
+  unfounded* — exactly the failure mode "publicly verifiable" is supposed to
+  exclude.  The aggregated `PK_l` (Round 1 step 11) also inherits the
+  small-order component, leaking outside the subgroup.
+
+**Mitigation:** subgroup-check every broadcast group element before
+verification.  This implementation does so for the PKI keys
+(`schnorr::SchnorrPoK::verify`) and for each dealing's Feldman commitment
+and pad commitments (`dkg::check_dealing_structure`).  See
+`tests/dkg.rs::off_subgroup_commitment_rejected` and
+`schnorr::tests::small_order_component_rejected`.
+
+The Bulletproofs proof's *internal* group elements (`A_I, A_O, S, T_*, IPA
+L/R`) do **not** need subgroup checks: a small-order component in those bases
+adds an *extra* constraint to the verification MSM that the prover must
+cancel; it cannot relax the soundness condition.
+
+---
+
+## 13. Batch-verification combiners must be unpredictable to the prover — **implementation pitfall**
+
+Section 5.3 batches per-dealing Bulletproofs verifications into one MSM
+`Σ_i r_i · check_i = 0` with random combiners `r_i`.  If two colluding
+dealers `i`, `j` can predict `r_i, r_j`, they can craft forged residues
+`check_i = -r_j/r_i · check_j` and pass the batch.  Drawing `r_i` from an
+honest verifier coin works but makes acceptance non-deterministic across
+verifiers (one observer's batch may fail while another's passes); drawing
+them from a poorly-seeded RNG is unsafe.
+
+This implementation derives the combiners by Fiat–Shamir from a transcript
+that absorbs every check's verification-transcript digest (which itself
+binds `(sid, pubs, proof)`), so the combiners are deterministic, every
+observer agrees, and the proofs must be fixed before the combiners are
+known (`bp_r1cs::verify_batch`).  The fy implementation uses one proof per
+`(dealer, recipient)` and does not batch, so it does not face this.
+
+---
+
 ## Open questions (could not resolve without the PDF)
 
 * Exactly how `β` is sampled (CRS? hashed? per-session?).  This implementation

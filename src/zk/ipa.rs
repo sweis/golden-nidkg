@@ -257,10 +257,11 @@ mod tests {
     use super::*;
     use crate::zk::generators::BpGens;
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     #[test]
     fn ipa_roundtrip() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let n = 8;
         let gens = BpGens::new(n);
         let q = gens.b_blinding; // any unrelated generator
@@ -303,7 +304,7 @@ mod tests {
 
     #[test]
     fn ipa_with_factors() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let n = 4;
         let gens = BpGens::new(n);
         let q = gens.b_blinding;

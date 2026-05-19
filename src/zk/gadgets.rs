@@ -424,27 +424,20 @@ fn lookup<CS: ConstraintSystem>(cs: &mut CS, bits: &[ScalarVar], table: &[GinAff
         }
     }
     // Multilinear interpolation coefficients `α_S = Σ_{T ⊆ S} (−1)^{|S|−|T|} table[T].coord`,
-    // computed for both coordinates in one Möbius pass.  `table[0] = identity
-    // = (0, 1)` on Jubjub so its `(x, y)` are already the right values.
-    let coords = |p: &GinAffine| {
-        if p.is_zero() {
-            (Fp::zero(), Fp::one())
-        } else {
-            (p.x, p.y)
-        }
-    };
+    // computed for both coordinates in one Möbius pass.  Twisted Edwards
+    // affine stores the identity as `(0, 1)` directly, so `table[0].x/.y` are
+    // already correct without a special case.
     let mut alpha = vec![(Fp::zero(), Fp::zero()); 1 << k];
     for s in 0usize..(1 << k) {
         let mut t = s;
         loop {
-            let sign = if ((s ^ t).count_ones()) % 2 == 0 {
-                Fp::one()
+            if (s ^ t).count_ones() % 2 == 0 {
+                alpha[s].0 += table[t].x;
+                alpha[s].1 += table[t].y;
             } else {
-                -Fp::one()
-            };
-            let (cx, cy) = coords(&table[t]);
-            alpha[s].0 += sign * cx;
-            alpha[s].1 += sign * cy;
+                alpha[s].0 -= table[t].x;
+                alpha[s].1 -= table[t].y;
+            }
             if t == 0 {
                 break;
             }
@@ -509,6 +502,7 @@ mod tests {
     use ark_ec::{AffineRepr, PrimeGroup};
     use ark_std::UniformRand;
     use merlin::Transcript;
+    use rand::SeedableRng;
 
     fn alloc_bit<CS: ConstraintSystem>(cs: &mut CS, b: Option<bool>) -> ScalarVar {
         let assignment = b.map(|b| {
@@ -541,7 +535,7 @@ mod tests {
 
     #[test]
     fn bit_decompose_gadget() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(64);
         let v = Fp::from(42u64);
 
@@ -568,7 +562,7 @@ mod tests {
     fn bit_decompose_canonical_gadget() {
         // Random `Fp` values must satisfy the `< p` constraint.  Exercises
         // the chained MSB→LSB comparison.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(1024);
         for v in [
             Fp::from(0u64),
@@ -599,7 +593,7 @@ mod tests {
 
     #[test]
     fn add_const_gadget() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
         let p = (GinProj::generator() * Fs::from(7u64)).into_affine();
         let q = (GinProj::generator() * Fs::from(11u64)).into_affine();
@@ -621,7 +615,7 @@ mod tests {
 
     #[test]
     fn add_var_gadget() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(16);
         let p = (GinProj::generator() * Fs::from(7u64)).into_affine();
         let q = (GinProj::generator() * Fs::from(11u64)).into_affine();
@@ -649,7 +643,7 @@ mod tests {
 
     #[test]
     fn on_curve_gadget() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
         let p = (GinProj::generator() * Fs::from(99u64)).into_affine();
         let mut prover = Prover::new(&gens, Transcript::new(b"test"));
@@ -662,7 +656,7 @@ mod tests {
 
     #[test]
     fn scalar_mul_const_gadget() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(64);
         let base = GinAffine::generator();
         let scalar = Fs::from(7u64);
@@ -689,7 +683,7 @@ mod tests {
     #[test]
     fn scalar_mul_zero_works() {
         // 0·B = identity (0, 1).  This used to be the offset trick's job.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(64);
         let base = GinAffine::generator();
         let bits_w = [false; 8];
@@ -718,7 +712,7 @@ mod tests {
         // arkworks for many random scalars and bases — including inputs with
         // boundary chunks (`λ` not a multiple of `WINDOW`).  This exercises
         // the multilinear lookup arithmetic without paying for a full proof.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
         for nbits in [1usize, 2, 3, 4, 7, 9, 15, 24] {
             for _ in 0..10 {
@@ -766,7 +760,7 @@ mod tests {
     fn linked_committed_variable() {
         // Verify that a committed value with γ=0 produces the linking
         // commitment `V = B^v` and the circuit can reference it.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(64);
         let v = Fp::rand(&mut rng);
         let two_v = v + v;

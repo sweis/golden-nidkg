@@ -6,8 +6,7 @@
 
 use crate::curves::{Fp, GoutAffine, GoutProj};
 use crate::shamir::Polynomial;
-use ark_ec::CurveGroup;
-use ark_ec::PrimeGroup;
+use ark_ec::{CurveGroup, PrimeGroup};
 
 /// `C = (g_out^{a_0}, …, g_out^{a_{t-1}})`.
 pub fn commit(poly: &Polynomial) -> Vec<GoutAffine> {
@@ -20,13 +19,22 @@ pub fn commit(poly: &Polynomial) -> Vec<GoutAffine> {
 
 /// `X_j = ∏_{l=0}^{t-1} A_l^{j^l} = g_out^{f(j)}` — Feldman share commitment
 /// via Horner-in-the-exponent.
+///
+/// `j` is a small participant index, so each Horner step uses `mul_bigint`
+/// over a single u64 limb (≈⌈log₂ j⌉ doublings) rather than a full 255-bit
+/// scalar multiplication.
 pub fn share_commitment(commitment: &[GoutAffine], j: u32) -> GoutAffine {
-    let z = Fp::from(j);
+    share_commitment_proj(commitment, j).into_affine()
+}
+
+/// Projective form of [`share_commitment`], for callers that immediately add
+/// the result into another accumulator.
+pub fn share_commitment_proj(commitment: &[GoutAffine], j: u32) -> GoutProj {
     let mut acc = GoutProj::from(commitment[commitment.len() - 1]);
     for a in commitment.iter().rev().skip(1) {
-        acc = acc * z + GoutProj::from(*a);
+        acc = acc.mul_bigint([j as u64]) + a;
     }
-    acc.into_affine()
+    acc
 }
 
 /// `g_out^{f(j)} == X_j`?  Used by tests — protocol verification computes
@@ -41,10 +49,11 @@ mod tests {
     use super::*;
     use crate::shamir;
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     #[test]
     fn share_commitments_match() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (poly, shares) = shamir::share(secret, 5, 3, &mut rng);
         let c = commit(&poly);
@@ -59,7 +68,7 @@ mod tests {
 
     #[test]
     fn tampered_share_rejected() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (poly, shares) = shamir::share(secret, 5, 3, &mut rng);
         let c = commit(&poly);

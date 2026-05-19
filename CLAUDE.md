@@ -135,7 +135,7 @@ cargo run --release --example demo -- 5 3 quick     # protocol-only, no real ZK
 
 - [x] Project skeleton, CLAUDE.md, BUGS.md
 - [x] Curve types, Shamir, Feldman VSS, Lagrange
-- [x] Schnorr PoK for PKI (identity-bound, replay/rogue-key safe)
+- [x] Schnorr PoK for PKI (identity-bound, replay/rogue-key safe, subgroup-checked)
 - [x] Hash-to-curve (Jubjub)
 - [x] eVRF pad derivation + symmetry test
 - [x] DKG Round0 / verify / Round1
@@ -144,19 +144,25 @@ cargo run --release --example demo -- 5 3 quick     # protocol-only, no real ZK
 - [x] Wire ZK proof into eVRF / DKG
 - [x] End-to-end demo binary
 - [x] Negative tests (tampered share, tampered VSS commitment, tampered proof,
-      tampered R, replay)
+      tampered R, replay, off-subgroup elements)
 - [x] Threshold reconstruction test (`t` parties recover `sk`, `t-1` cannot)
 - [x] Key refresh (`omega_i = 0`)
 - [x] Batched eVRF proof (Section 5.3): one proof per dealer, shared `sk` gadget
 - [x] 3-bit window scalar mult gadget + Karatsuba `add_var` (~3.4 muls/bit)
 - [x] Parallel IPA fold + parallel CRS setup (`--features parallel`, default on)
+- [x] Batch-verification of multiple dealings' Bulletproofs (Section 5.3) with
+      Fiat-Shamir-derived combiners; per-dealing circuit reconstruction
+      parallelised under `--features parallel`
+- [x] Subgroup checks for all broadcast group elements (BUGS.md §12)
+- [x] `Zeroize`/`ZeroizeOnDrop` for secret-bearing types (`Polynomial`,
+      `EvrfWitness`, `DealingPrivate`); `CryptoRng` bounds on prover/dealer RNGs
 - [ ] Key resharing / membership change (Section 5.2 mentions this is supported
       via the same machinery as refresh; not implemented here)
 - [ ] Constant-time hash-to-curve (current impl is try-and-increment)
 - [ ] Serialization (`ark-serialize` / `borsh`) for `Dealing`, `EvrfProof`, etc.
-- [ ] Aggregate the cheap `g^z = R · X` check into one MSM
-- [ ] Batch-verification of multiple dealings' Bulletproofs (random linear
-      combination across proofs — Section 5.3 mentions ~30% verifier savings)
+- [ ] Aggregate the per-recipient `g^z = R · X` check into one MSM (matters
+      for `n ≳ 50`; the `share_commitment` Horner already uses small-scalar
+      `mul_bigint` for the `j ≤ n` indices)
 
 ## Notes & gotchas (see BUGS.md for paper-level findings)
 

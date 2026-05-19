@@ -112,7 +112,7 @@ fn dkg_end_to_end() {
         for d in dealings.values() {
             verify_dealing(d, &net.cfg, &net.pki, &net.zk, false).unwrap();
         }
-        verify_dealings(&dealings, &net.cfg, &net.pki, &net.zk, false, &mut net.rng).unwrap();
+        verify_dealings(&dealings, &net.cfg, &net.pki, &net.zk, false).unwrap();
         let mut outs = BTreeMap::new();
         for rk in net.registry.clone() {
             let out = complete(
@@ -308,6 +308,57 @@ fn wrong_degree_commitment_rejected() {
     assert!(matches!(
         verify_dealing(&dealings[&1], &net.cfg, &net.pki, &net.zk, false),
         Err(GoldenError::WrongCommitmentLength { dealer: 1, .. })
+    ));
+}
+
+#[test]
+fn off_subgroup_commitment_rejected() {
+    // BLS12-381 G1's cofactor has small prime factors (3, 11, …).  A dealing
+    // whose `A_l` or `R_{jk}` carry a small-order component can pass the
+    // `g^z = R · X` check (the dealer crafts the components to cancel) and the
+    // eVRF proof (after grinding the FS challenges) — yet the recipient's
+    // re-derived `R'` is in `G_1`, so `complete()` raises a false complaint.
+    // Public verification must reject any off-subgroup element up front.
+    use ark_bls12_381::Fq;
+    use ark_ff::Field;
+    let off_subgroup = {
+        let mut x = Fq::from(2u64);
+        loop {
+            // E(Fq): y² = x³ + 4.  Curve order is `cofactor · p`, so a random
+            // curve point is in the prime-order subgroup with prob. 1/cofactor.
+            if let Some(y) = (x * x * x + Fq::from(4u64)).sqrt() {
+                let p = golden_nidkg::GoutAffine::new_unchecked(x, y);
+                if p.is_on_curve() && !p.is_in_correct_subgroup_assuming_on_curve() {
+                    break p;
+                }
+            }
+            x += Fq::ONE;
+        }
+    };
+
+    let (n, t) = (3, 2);
+    let mut net = TestNet::new(n, t);
+    let (dealings, _) = net.round0_all();
+
+    // Off-subgroup VSS commitment.
+    let mut d1 = dealings.clone();
+    d1.get_mut(&1).unwrap().commitment[1] = off_subgroup;
+    assert!(matches!(
+        verify_dealing(&d1[&1], &net.cfg, &net.pki, &net.zk, false),
+        Err(GoldenError::ElementNotInSubgroup { dealer: 1 })
+    ));
+
+    // Off-subgroup pad commitment R.
+    let mut d2 = dealings.clone();
+    d2.get_mut(&1)
+        .unwrap()
+        .ciphertexts
+        .get_mut(&2)
+        .unwrap()
+        .r_commit = off_subgroup;
+    assert!(matches!(
+        verify_dealing(&d2[&1], &net.cfg, &net.pki, &net.zk, false),
+        Err(GoldenError::ElementNotInSubgroup { dealer: 1 })
     ));
 }
 

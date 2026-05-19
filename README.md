@@ -80,12 +80,11 @@ round-trip and rejects a tampered `R`.
 
 | Operation              | n=3, t=2 | n=5, t=4 | Notes |
 |------------------------|----------|----------|-------|
-| ZK CRS setup           | ~1.4 s   | ~3 s     | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
-| Dealing (Round 0)      | ~3.4 s   | ~5.6 s   | One batched eVRF proof per dealer. |
-| Verify one dealing     | ~150 ms  | ~250 ms  | Single MSM. |
-| Verify all `n` (batch) | ~80 ms/d | ~130 ms/d| `verify_dealings` — one MSM, §5.3. |
+| ZK CRS setup           | ~1.3 s   | ~3 s     | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
+| Dealing (Round 0)      | ~3.1 s   | ~8.4 s   | One batched eVRF proof per dealer. |
+| Verify one dealing     | ~145 ms  | ~250 ms  | Circuit reconstruction + single MSM. |
+| Verify all `n` (batch) | ~45 ms/d | ~56 ms/d | `verify_dealings` — parallel circuit builds + one MSM, §5.3. |
 | Round 1                | <1 ms    | <1 ms    | |
-| Whole demo             | ~25 s    | ~70 s    | Incl. setup, 2× DKG (init + refresh). |
 
 The implementation uses the *batched* protocol from §5.3 of the paper:
 
@@ -93,9 +92,12 @@ The implementation uses the *batched* protocol from §5.3 of the paper:
   evaluations, sharing the dealer's `sk` bit decomposition and `g_in^{sk}`
   gadget.  For `n=5` this is ≈13.4 k mul gates (16 384 generator pairs); each
   additional recipient adds ~3.1 k gates.
-* **batched verification** — `verify_dealings()` collects all dealers'
-  verification MSMs and verifies them with a single random-linear-combination
-  MSM over the shared `G[]/H[]` Bulletproofs generators.
+* **batched verification** — `verify_dealings()` reconstructs each dealing's
+  verification circuit in parallel, then combines the resulting MSM
+  coefficients with Fiat–Shamir-derived weights into a single MSM over the
+  shared `G[]/H[]` Bulletproofs generators.  The combiners are deterministic
+  so every observer accepts the same set, and a colluding pair of dealers
+  cannot pre-compute proofs whose residues cancel (`BUGS.md §13`).
 
 The `R_eVRF` circuit uses 3-bit-window scalar multiplication (≈3.4 mul gates
 per scalar bit) and a chained `< p` comparison to make the `int(S.x)`

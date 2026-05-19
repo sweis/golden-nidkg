@@ -23,12 +23,12 @@ use crate::evrf::{EvrfWitness, SessionId};
 use crate::transcript::TranscriptExt;
 use crate::zk::bp_r1cs::{verify_batch, Prover, R1CSProof, VerificationCheck, Verifier};
 use crate::zk::evrf_circuit::{
-    batch_gens_capacity, build_batch_circuit, default_lambda, EvrfPeerInputs,
+    batch_gens_capacity, build_batch_circuit, EvrfPeerInputs, DEFAULT_LAMBDA,
 };
 use crate::zk::generators::BpGens;
 use ark_ec::CurveGroup;
 use ark_ff::Zero;
-use ark_std::rand::Rng;
+use ark_std::rand::{CryptoRng, Rng};
 use ark_std::UniformRand;
 use merlin::Transcript;
 use std::sync::Arc;
@@ -59,7 +59,7 @@ impl ZkParams {
     /// `2·batch_gens_capacity(255, max_peers)` curve points — for `max_peers
     /// = 4` that is ~32k points (~10 s); call once and reuse.
     pub fn full(max_peers: usize) -> Self {
-        Self::with_lambda(default_lambda(), max_peers)
+        Self::with_lambda(DEFAULT_LAMBDA, max_peers)
     }
     /// `full()` with a custom `lambda` (bit decomposition width).  Use 255
     /// for production; smaller for tests with bounded witnesses.
@@ -111,10 +111,14 @@ pub struct BatchPublicInputs {
     pub peers: Vec<EvrfPeerInputs>,
 }
 
-/// Build a fresh transcript bound to all the public inputs.
-fn batch_transcript(sid: &SessionId, pubs: &BatchPublicInputs) -> Transcript {
+/// Build a fresh transcript bound to all the public inputs and the circuit
+/// shape parameter `lambda`.  Binding `lambda` makes a prover/verifier
+/// parameter mismatch fail cleanly at the first challenge rather than as an
+/// MSM mismatch deep in the IPA.
+fn batch_transcript(params: &ZkParams, sid: &SessionId, pubs: &BatchPublicInputs) -> Transcript {
     let mut t = Transcript::new(b"golden-nidkg/evrf-batch-proof/v1");
     t.append_bytes(b"sid", &sid.0);
+    t.append_u64(b"lambda", params.lambda as u64);
     t.append_gin(b"PK1", &pubs.pk1);
     t.append_gin(b"H1m", &pubs.h1m);
     t.append_gin(b"H2m", &pubs.h2m);
@@ -135,7 +139,7 @@ pub fn prove_evrf_batch(
     sid: &SessionId,
     pubs: &BatchPublicInputs,
     wits: &[EvrfWitness],
-    rng: &mut impl Rng,
+    rng: &mut (impl Rng + CryptoRng),
 ) -> GoldenResult<EvrfProof> {
     if wits.len() != pubs.peers.len() {
         return Err(GoldenError::Internal(
@@ -147,7 +151,7 @@ pub fn prove_evrf_batch(
     }
     match params.mode {
         ZkMode::InsecureQuick => {
-            let mut t = batch_transcript(sid, pubs);
+            let mut t = batch_transcript(params, sid, pubs);
             let proofs = pubs
                 .peers
                 .iter()
@@ -173,7 +177,7 @@ pub fn prove_evrf_batch(
                     max: params.max_peers,
                 });
             }
-            let t = batch_transcript(sid, pubs);
+            let t = batch_transcript(params, sid, pubs);
             let mut prover = Prover::new(&params.gens, t);
             let mut r_vars = Vec::with_capacity(wits.len());
             for w in wits {
@@ -229,7 +233,7 @@ pub fn collect_evrf_check(
             if proofs.len() != pubs.peers.len() {
                 return Err(GoldenError::Proof("peer count mismatch".into()));
             }
-            let mut t = batch_transcript(sid, pubs);
+            let mut t = batch_transcript(params, sid, pubs);
             for (p, sp) in pubs.peers.iter().zip(proofs) {
                 t.append_gout(b"Rj", &p.r_commit);
                 t.append_gout(b"commit", &sp.commitment);
@@ -252,7 +256,7 @@ pub fn collect_evrf_check(
                     max: params.max_peers,
                 });
             }
-            let t = batch_transcript(sid, pubs);
+            let t = batch_transcript(params, sid, pubs);
             let mut verifier = Verifier::new(&params.gens, t);
             let r_vars: Vec<_> = pubs
                 .peers
@@ -281,15 +285,12 @@ pub fn collect_evrf_check(
 
 /// Batch-verify several dealings' eVRF proofs by random linear combination of
 /// their verification MSMs (Section 5.3 of the paper).  Each `check` should
-/// come from [`collect_evrf_check`].  When the batch fails, this does *not*
-/// say which dealing was bad — call [`verify_evrf_batch`] per dealing to
-/// localise the fault.
-pub fn verify_evrf_checks(
-    params: &ZkParams,
-    checks: &[VerificationCheck],
-    rng: &mut impl Rng,
-) -> GoldenResult<()> {
-    verify_batch(&params.gens, checks, rng).map_err(GoldenError::Proof)
+/// come from [`collect_evrf_check`].  Deterministic: the combiners are derived
+/// by Fiat-Shamir from the checks' transcript digests.  When the batch fails,
+/// this does *not* say which dealing was bad — call [`verify_evrf_batch`] per
+/// dealing to localise the fault.
+pub fn verify_evrf_checks(params: &ZkParams, checks: &[VerificationCheck]) -> GoldenResult<()> {
+    verify_batch(&params.gens, checks).map_err(GoldenError::Proof)
 }
 
 #[cfg(test)]
@@ -299,9 +300,10 @@ mod tests {
     use crate::evrf::{eval_pad, Beta, SessionId};
     use crate::hash_to_curve::{h1, h2};
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     fn setup(n_peers: usize) -> (BatchPublicInputs, Vec<EvrfWitness>, SessionId) {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let sk1 = Fs::rand(&mut rng);
         let pk1 = gin_mul(&sk1);
         let sid = SessionId([3u8; 32]);
@@ -331,7 +333,7 @@ mod tests {
 
     #[test]
     fn quick_proof_roundtrip() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let (pubs, wits, sid) = setup(3);
         let params = ZkParams::insecure_quick();
         let proof = prove_evrf_batch(&params, &sid, &pubs, &wits, &mut rng).unwrap();

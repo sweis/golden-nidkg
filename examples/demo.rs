@@ -101,7 +101,7 @@ fn main() {
     // ── Public verification (any observer can do this) ──
     println!("\n[4] Public verification: any observer checks every dealing (batched MSM)");
     let v_start = Instant::now();
-    verify_dealings(&dealings, &cfg, &pki, &zk, false, &mut rng).expect("verify");
+    verify_dealings(&dealings, &cfg, &pki, &zk, false).expect("verify");
     println!("    all {n} dealings verified in {:?}", v_start.elapsed());
 
     // ── Round 1: each party decrypts + aggregates ──
@@ -166,7 +166,7 @@ fn main() {
         refresh_dealings.insert(rk.id, d);
         refresh_privates.insert(rk.id, p);
     }
-    verify_dealings(&refresh_dealings, &cfg2, &pki, &zk, true, &mut rng).expect("refresh verify");
+    verify_dealings(&refresh_dealings, &cfg2, &pki, &zk, true).expect("refresh verify");
     let mut new_outputs = BTreeMap::new();
     for rk in &registry {
         let delta = complete(

@@ -8,32 +8,22 @@
 use crate::curves::Fp;
 use crate::errors::{GoldenError, GoldenResult};
 use ark_ff::{Field, Zero};
-use ark_std::rand::Rng;
-use zeroize::Zeroize;
+use ark_std::rand::{CryptoRng, Rng};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A polynomial `f(Z) = a_0 + a_1 Z + … + a_{deg} Z^{deg}` over `F_p`.
 ///
-/// `coeffs[0] = f(0)` is the secret.  Coefficients are zeroized on drop.
-#[derive(Clone)]
+/// `coeffs[0] = f(0)` is the secret.  Coefficients are zeroized on drop
+/// (`ark_ff::Fp` implements `Zeroize`, so `Vec<Fp>::zeroize` is a true
+/// volatile scrub of the limbs, not an optimisable-away assignment).
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct Polynomial {
     coeffs: Vec<Fp>,
 }
 
-impl Drop for Polynomial {
-    fn drop(&mut self) {
-        // Best-effort scrub of polynomial coefficients on drop.  arkworks `Fr`
-        // is `Copy`, so we overwrite in place; the underlying memory is just
-        // four u64 limbs in Montgomery form.
-        for c in self.coeffs.iter_mut() {
-            *c = Fp::zero();
-        }
-        self.coeffs.zeroize();
-    }
-}
-
 impl Polynomial {
     /// Build a random polynomial of degree `t-1` with `f(0) = secret`.
-    pub fn random_with_secret(secret: Fp, t: u32, rng: &mut impl Rng) -> Self {
+    pub fn random_with_secret(secret: Fp, t: u32, rng: &mut (impl Rng + CryptoRng)) -> Self {
         assert!(t >= 1, "threshold must be at least 1");
         let mut coeffs = Vec::with_capacity(t as usize);
         coeffs.push(secret);
@@ -82,7 +72,12 @@ impl Polynomial {
 /// `Share(x, n, t)` — produce `(f, [(1, f(1)), …, (n, f(n))])`.
 ///
 /// Indices are **1-based**: `f(0)` is the secret.
-pub fn share(secret: Fp, n: u32, t: u32, rng: &mut impl Rng) -> (Polynomial, Vec<(u32, Fp)>) {
+pub fn share(
+    secret: Fp,
+    n: u32,
+    t: u32,
+    rng: &mut (impl Rng + CryptoRng),
+) -> (Polynomial, Vec<(u32, Fp)>) {
     assert!(t >= 1 && t <= n, "require 1 ≤ t ≤ n");
     let poly = Polynomial::random_with_secret(secret, t, rng);
     let shares = (1..=n).map(|i| (i, poly.evaluate(Fp::from(i)))).collect();
@@ -151,10 +146,11 @@ pub fn interpolate_at(shares: &[(u32, Fp)], z: Fp) -> Fp {
 mod tests {
     use super::*;
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     #[test]
     fn share_recover_roundtrip() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         for (n, t) in [(1, 1), (3, 2), (5, 3), (10, 7)] {
             let secret = Fp::rand(&mut rng);
             let (_, shares) = share(secret, n, t, &mut rng);
@@ -169,7 +165,7 @@ mod tests {
 
     #[test]
     fn fewer_than_t_shares_fails() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (_, shares) = share(secret, 5, 3, &mut rng);
         assert!(recover(3, &shares[..2]).is_err());
@@ -177,7 +173,7 @@ mod tests {
 
     #[test]
     fn t_minus_one_shares_do_not_reveal() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (_, shares) = share(secret, 5, 3, &mut rng);
         // Force "recovery" with only t-1 shares by lying about `t`.
@@ -187,7 +183,7 @@ mod tests {
 
     #[test]
     fn duplicate_indices_rejected() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (_, shares) = share(secret, 5, 3, &mut rng);
         let dup = vec![shares[0], shares[0], shares[1]];
@@ -197,7 +193,7 @@ mod tests {
     #[test]
     fn index_zero_rejected() {
         // index 0 *is* the secret; treating it as a share must error.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (poly, shares) = share(secret, 5, 3, &mut rng);
         let bad = vec![(0u32, poly.secret()), shares[0], shares[1]];
@@ -206,7 +202,7 @@ mod tests {
 
     #[test]
     fn interpolate_arbitrary_point() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let secret = Fp::rand(&mut rng);
         let (poly, shares) = share(secret, 5, 3, &mut rng);
         let z = Fp::from(42u64);

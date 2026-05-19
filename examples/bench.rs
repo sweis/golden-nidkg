@@ -125,7 +125,7 @@ fn main() {
     );
 
     let t0 = Instant::now();
-    verify_dealings(&dealings, &cfg, &pki, &zk_n, false, &mut rng).unwrap();
+    verify_dealings(&dealings, &cfg, &pki, &zk_n, false).unwrap();
     let v = t0.elapsed();
     println!(
         "Verify {n} dealings (batched):    {v:?}   (≈{:?} per dealing)",

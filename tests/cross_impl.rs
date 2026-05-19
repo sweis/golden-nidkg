@@ -15,6 +15,7 @@
 //!
 //! Test vectors are in `tests/fy_test_vectors.txt`, regenerated with
 //! `go run ./cmd/testvectors/` against the fy `golden` package.
+use rand::SeedableRng;
 
 use golden_nidkg::curves::Fp;
 use golden_nidkg::shamir::{recover, share, Polynomial};
@@ -54,7 +55,7 @@ fn shamir_small_integer_eval_matches_fy() {
 /// confirm that the share-commitment derivation matches the polynomial.)
 #[test]
 fn feldman_vss_consistent_with_shamir() {
-    let mut rng = ark_std::test_rng();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0);
     let secret = Fp::from(42u64);
     let (poly, shares) = share(secret, 5, 3, &mut rng);
     let c = vss::commit(&poly);
@@ -70,7 +71,7 @@ fn feldman_vss_consistent_with_shamir() {
 fn pad_symmetry_invariant() {
     use golden_nidkg::curves::{gin_mul, Fs};
     use golden_nidkg::evrf::{eval_pad, Beta, SessionId};
-    let mut rng = ark_std::test_rng();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0);
     use ark_ff::UniformRand;
     let sk_a = Fs::rand(&mut rng);
     let sk_b = Fs::rand(&mut rng);

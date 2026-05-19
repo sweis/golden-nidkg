@@ -33,9 +33,7 @@ use ark_ff::Field;
 /// Bit width used for `sk` and `k` decompositions.  `255` covers the full
 /// `F_p` range; smaller values are used in tests for speed (with reduced
 /// soundness against large witnesses).
-pub fn default_lambda() -> usize {
-    255
-}
+pub const DEFAULT_LAMBDA: usize = 255;
 
 /// Public inputs for one *recipient* in a batched proof.
 #[derive(Clone, Debug)]
@@ -195,6 +193,7 @@ mod tests {
     use ark_ff::Zero;
     use ark_std::UniformRand;
     use merlin::Transcript;
+    use rand::SeedableRng;
 
     /// Tests that the circuit *shape* matches between prover and verifier and
     /// produces a valid proof when the witness is internally consistent.
@@ -202,10 +201,10 @@ mod tests {
     /// optimised build (≈4 s on 4 cores).
     #[test]
     fn evrf_circuit_shape_and_proof_lambda_full() {
-        let lambda = default_lambda();
+        let lambda = DEFAULT_LAMBDA;
         let cap = gens_capacity(lambda);
         let gens = BpGens::new(cap);
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 
         let sk1 = Fs::rand(&mut rng);
         let pk1 = gin_mul(&sk1);

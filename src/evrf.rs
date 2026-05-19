@@ -23,6 +23,7 @@
 use crate::curves::{fp_to_fs, gout_mul, x_coord, Fp, Fs, GinAffine, GinProj, GoutAffine};
 use crate::hash_to_curve::{h1, h2, hash_to_fp};
 use ark_ec::CurveGroup;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A session/CRS identifier.  Mixed into the eVRF hashes and the proof
 /// transcript so cross-session replay is impossible (BUGS.md §5).
@@ -75,7 +76,11 @@ pub struct PadOutput {
 }
 
 /// Witness data needed to prove `R_eVRF` (private to the dealer).
-#[derive(Clone, Debug)]
+///
+/// Carries the dealer's PKI secret key `sk`, the DH shared secret `S` and the
+/// derived pad — all secret material.  Zeroized on drop; deliberately not
+/// `Debug` so it cannot be accidentally logged.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct EvrfWitness {
     pub sk: Fs,
     pub s: GinAffine,
@@ -163,9 +168,10 @@ mod tests {
     use super::*;
     use crate::curves::gin_mul;
     use ark_std::UniformRand;
+    use rand::SeedableRng;
 
     fn setup() -> (Fs, GinAffine, Fs, GinAffine, SessionId, Beta) {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let sk1 = Fs::rand(&mut rng);
         let pk1 = gin_mul(&sk1);
         let sk2 = Fs::rand(&mut rng);
@@ -195,7 +201,7 @@ mod tests {
         let (c, _) = eval_pad(&sk1, &pk2, &sid2, b"a", &beta);
         assert_ne!(a.r, c.r);
         // Different peer.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let pk3 = gin_mul(&Fs::rand(&mut rng));
         let (d, _) = eval_pad(&sk1, &pk3, &sid, b"a", &beta);
         assert_ne!(a.r, d.r);

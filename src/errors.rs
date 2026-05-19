@@ -31,12 +31,8 @@ pub enum GoldenError {
     #[error("ciphertext consistency check failed: dealer {dealer} → recipient {recipient}")]
     CiphertextCheckFailed { dealer: u32, recipient: u32 },
 
-    #[error("eVRF proof failed: dealer {dealer} → recipient {recipient}: {reason}")]
-    EvrfProofFailed {
-        dealer: u32,
-        recipient: u32,
-        reason: String,
-    },
+    #[error("eVRF proof failed for dealer {dealer}: {reason}")]
+    EvrfProofFailed { dealer: u32, reason: String },
 
     #[error("dealer {dealer} did not send a ciphertext for recipient {recipient}")]
     MissingCiphertext { dealer: u32, recipient: u32 },
@@ -46,6 +42,14 @@ pub enum GoldenError {
 
     #[error("PKI public key for party {party} is the identity")]
     IdentityPublicKey { party: u32 },
+
+    #[error("PKI public key for party {party} is not in the prime-order subgroup")]
+    PublicKeyNotInSubgroup { party: u32 },
+
+    #[error(
+        "dealing from dealer {dealer} contains a group element not in the prime-order subgroup"
+    )]
+    ElementNotInSubgroup { dealer: u32 },
 
     #[error("PKI keys for parties {a} and {b} are equal or negations — see BUGS.md §1/§2")]
     PkiKeyCollision { a: u32, b: u32 },

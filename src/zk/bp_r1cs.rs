@@ -20,7 +20,7 @@ use crate::zk::ipa::{inner_product, powers, InnerProductProof};
 use crate::zk::r1cs::{flatten, Assignments, ConstraintSystem, LinearCombination, Variable};
 use ark_ec::{CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, Zero};
-use ark_std::rand::Rng;
+use ark_std::rand::{CryptoRng, Rng};
 use ark_std::UniformRand;
 use merlin::Transcript;
 
@@ -103,8 +103,10 @@ impl<'g> Prover<'g> {
         )
     }
 
-    /// Produce the proof from the accumulated circuit.
-    pub fn prove(mut self, rng: &mut impl Rng) -> Result<R1CSProof, String> {
+    /// Produce the proof from the accumulated circuit.  The RNG must be
+    /// cryptographically secure: the blinding factors it samples are what
+    /// make the proof zero-knowledge.
+    pub fn prove(mut self, rng: &mut (impl Rng + CryptoRng)) -> Result<R1CSProof, String> {
         // 1. Pad the multiplication-gate vectors to a power of two.
         let n0 = self.assignments.a_l.len();
         let n = n0.next_power_of_two().max(1);
@@ -123,11 +125,12 @@ impl<'g> Prover<'g> {
         let s_r: Vec<Fp> = (0..n).map(|_| Fp::rand(rng)).collect();
 
         // 2. Commit to a_L, a_R, a_O, s_L, s_R.  `A_I` and `S` use the same
-        //    base list `[B_b, G[..n], H[..n]]`; build it once.
+        //    base list `[B_b, G[..n], H[..n]]`; build it once.  Pad the witness
+        //    vectors in place rather than cloning (`n` ≈ 8 k–32 k).
         let (g_vec, h_vec) = self.gens.share(n);
-        let a_l = pad_vec(&self.assignments.a_l, n);
-        let a_r = pad_vec(&self.assignments.a_r, n);
-        let a_o = pad_vec(&self.assignments.a_o, n);
+        let a_l = take_padded(&mut self.assignments.a_l, n);
+        let a_r = take_padded(&mut self.assignments.a_r, n);
+        let a_o = take_padded(&mut self.assignments.a_o, n);
         let mut commit_bases = Vec::with_capacity(2 * n + 1);
         commit_bases.push(self.gens.b_blinding);
         commit_bases.extend_from_slice(g_vec);
@@ -451,6 +454,14 @@ impl<'g> Verifier<'g> {
         extra_bases.push(proof.t_6);
         extra_scalars.push(r_chal * xxx * xxx);
 
+        // Bind the entire transcript (public inputs + every proof element +
+        // every challenge) into a digest.  [`verify_batch`] derives its random
+        // combiners from these digests, so a colluding pair of provers cannot
+        // pick proofs whose verification residues cancel under known weights.
+        let mut digest = [0u8; 32];
+        self.transcript
+            .challenge_bytes(b"check-digest", &mut digest);
+
         Ok(VerificationCheck {
             g_scalars,
             h_scalars,
@@ -458,6 +469,7 @@ impl<'g> Verifier<'g> {
             b_blinding_scalar,
             extra_bases,
             extra_scalars,
+            digest,
         })
     }
 }
@@ -481,6 +493,9 @@ pub struct VerificationCheck {
     pub extra_bases: Vec<GoutAffine>,
     /// Scalars for `extra_bases`.
     pub extra_scalars: Vec<Fp>,
+    /// Transcript digest binding the proof and all public inputs.  Used by
+    /// [`verify_batch`] to derive Fiat-Shamir batch combiners.
+    pub digest: [u8; 32],
 }
 
 impl VerificationCheck {
@@ -510,11 +525,15 @@ impl VerificationCheck {
 /// MSM is `O(n + Σ_i |extra_i|)` instead of `O(Σ_i (n + |extra_i|))` — for
 /// small `extra` this is roughly a `k×` speed-up over verifying `k` proofs
 /// individually (Section 5.3 of the paper).
-pub fn verify_batch(
-    gens: &BpGens,
-    checks: &[VerificationCheck],
-    rng: &mut impl Rng,
-) -> Result<(), String> {
+///
+/// The combiners `r_i` are derived by Fiat-Shamir from a transcript that
+/// absorbs every check's [`VerificationCheck::digest`] (which itself binds the
+/// whole verification transcript: public inputs + proof elements).  This makes
+/// batch verification deterministic — every observer accepts the same set —
+/// and removes the dependence on a verifier RNG, which would otherwise be a
+/// soundness footgun: a colluding pair of dealers could solve `r_i·c_i +
+/// r_j·c_j = 0` for forged residues `c_i, c_j` if they could predict `r_i, r_j`.
+pub fn verify_batch(gens: &BpGens, checks: &[VerificationCheck]) -> Result<(), String> {
     let Some((first, rest)) = checks.split_first() else {
         return Ok(());
     };
@@ -524,6 +543,14 @@ pub fn verify_batch(
         .any(|c| c.g_scalars.len() != n || c.h_scalars.len() != n)
     {
         return Err("verify_batch: heterogeneous gens widths".into());
+    }
+    // Derive the combiners from a transcript that has absorbed *all* the
+    // checks' digests, so `r_i` is unpredictable to a prover until every
+    // proof in the batch is fixed.
+    let mut t = Transcript::new(b"golden-nidkg/bp-batch-verify/v1");
+    t.append_u64(b"k", checks.len() as u64);
+    for c in checks {
+        t.append_bytes(b"digest", &c.digest);
     }
     // Pin `r_0 = 1`: with `k` checks only `k-1` random combiners are needed,
     // saving `2n + |extra_0| + 2` field mults for the first check.
@@ -537,7 +564,7 @@ pub fn verify_batch(
     extra_bases.extend_from_slice(&first.extra_bases);
     extra_scalars.extend_from_slice(&first.extra_scalars);
     for chk in rest {
-        let ri = Fp::rand(rng);
+        let ri = t.challenge_fp(b"r");
         accumulate_weighted(&mut g_acc, &chk.g_scalars, ri);
         accumulate_weighted(&mut h_acc, &chk.h_scalars, ri);
         b_acc += ri * chk.b_scalar;
@@ -714,15 +741,16 @@ impl Poly6 {
     }
 }
 
-fn pad_vec(v: &[Fp], n: usize) -> Vec<Fp> {
-    let mut out = v.to_vec();
-    out.resize(n, Fp::zero());
-    out
+/// Resize `v` in place to length `n` (zero-padding) and take ownership.
+fn take_padded(v: &mut Vec<Fp>, n: usize) -> Vec<Fp> {
+    v.resize(n, Fp::zero());
+    std::mem::take(v)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     /// Toy gadget: prove `(a + b) * (c + d) = e` for committed values.
     fn toy_gadget<CS: ConstraintSystem>(
@@ -742,7 +770,7 @@ mod tests {
 
     #[test]
     fn bp_r1cs_toy() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
 
         let (a, b, c, d) = (
@@ -775,7 +803,7 @@ mod tests {
 
     #[test]
     fn bp_r1cs_toy_wrong() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
 
         let (a, b, c, d) = (
@@ -813,7 +841,7 @@ mod tests {
     #[test]
     fn bp_r1cs_zero_blinding_links() {
         // Commit with γ=0 ⇒ V = B^v.  This is the linking trick for `R = g_out^r`.
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
         let v = Fp::from(42u64);
 
@@ -839,7 +867,7 @@ mod tests {
     /// Tampering with each proof field individually must break verification.
     #[test]
     fn bp_r1cs_proof_malleability() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let gens = BpGens::new(8);
         let (a, b, c, d) = (
             Fp::from(3u64),

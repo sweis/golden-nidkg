@@ -9,10 +9,8 @@
 use crate::curves::{Fs, GinAffine, GinProj};
 use crate::errors::{GoldenError, GoldenResult};
 use crate::transcript::TranscriptExt;
-#[allow(unused_imports)]
-use ark_ec::AffineRepr;
 use ark_ec::{CurveGroup, PrimeGroup};
-use ark_std::rand::Rng;
+use ark_std::rand::{CryptoRng, Rng};
 use ark_std::UniformRand;
 use merlin::Transcript;
 
@@ -35,7 +33,10 @@ fn challenge(id: u32, pk: &GinAffine, commitment: &GinAffine) -> Fs {
 
 impl SchnorrPoK {
     /// Prove knowledge of `sk` for `PK = g_in^sk`, bound to `id`.
-    pub fn prove(id: u32, sk: &Fs, pk: &GinAffine, rng: &mut impl Rng) -> Self {
+    ///
+    /// `rng` must be cryptographically secure: a predictable Schnorr nonce
+    /// `k` lets an observer recover `sk = (s − k) / c`.
+    pub fn prove(id: u32, sk: &Fs, pk: &GinAffine, rng: &mut (impl Rng + CryptoRng)) -> Self {
         let k = Fs::rand(rng);
         let commitment = (GinProj::generator() * k).into_affine();
         let c = challenge(id, pk, &commitment);
@@ -47,9 +48,21 @@ impl SchnorrPoK {
     }
 
     /// Verify against the (id, PK) the registrant claims.
+    ///
+    /// Besides the Schnorr verification equation, this enforces that `PK` is
+    /// a non-identity point of the *prime-order subgroup* of `G_in`.  Jubjub
+    /// has cofactor 8; a key with a low-order component would (a) make the
+    /// eVRF DH secret `S = PK^{sk}` differ between the two parties and (b)
+    /// permit grinding the Schnorr challenge to an order-multiple, so the
+    /// PoK alone does not exclude it.  arkworks' `CanonicalDeserialize`
+    /// performs this check on deserialization, but the library cannot assume
+    /// the application only gets keys via deserialization.
     pub fn verify(&self, id: u32, pk: &GinAffine) -> GoldenResult<()> {
         if pk.is_zero() {
             return Err(GoldenError::IdentityPublicKey { party: id });
+        }
+        if !pk.is_on_curve() || !pk.is_in_correct_subgroup_assuming_on_curve() {
+            return Err(GoldenError::PublicKeyNotInSubgroup { party: id });
         }
         let c = challenge(id, pk, &self.commitment);
         // g^s == R · PK^c
@@ -72,15 +85,15 @@ pub struct RegisteredKey {
 }
 
 impl RegisteredKey {
-    pub fn new(id: u32, sk: &Fs, rng: &mut impl Rng) -> (Self, Fs) {
+    pub fn new(id: u32, sk: &Fs, rng: &mut (impl Rng + CryptoRng)) -> Self {
         let pk = (GinProj::generator() * sk).into_affine();
         let pok = SchnorrPoK::prove(id, sk, &pk, rng);
-        (Self { id, pk, pok }, *sk)
+        Self { id, pk, pok }
     }
 
-    pub fn fresh(id: u32, rng: &mut impl Rng) -> (Self, Fs) {
+    pub fn fresh(id: u32, rng: &mut (impl Rng + CryptoRng)) -> (Self, Fs) {
         let sk = Fs::rand(rng);
-        Self::new(id, &sk, rng)
+        (Self::new(id, &sk, rng), sk)
     }
 
     pub fn verify(&self) -> GoldenResult<()> {
@@ -109,10 +122,11 @@ pub fn verify_pki(registry: &[RegisteredKey]) -> GoldenResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn pok_roundtrip() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let (rk, _) = RegisteredKey::fresh(1, &mut rng);
         assert!(rk.verify().is_ok());
     }
@@ -121,7 +135,7 @@ mod tests {
     fn pok_replay_to_other_id_fails() {
         // An adversary replaying honest party 1's registration to register
         // themselves as party 2 must fail (BUGS.md §1).
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let (rk1, _) = RegisteredKey::fresh(1, &mut rng);
         let stolen = RegisteredKey {
             id: 2,
@@ -133,7 +147,7 @@ mod tests {
 
     #[test]
     fn identity_key_rejected() {
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let pk = GinAffine::zero();
         let pok = SchnorrPoK::prove(1, &Fs::from(0u64), &pk, &mut rng);
         assert!(pok.verify(1, &pk).is_err());
@@ -142,16 +156,38 @@ mod tests {
     #[test]
     fn pki_collision_rejected() {
         // Two registrations with the same PK (e.g. a fully malicious PKI).
-        let mut rng = ark_std::test_rng();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let (rk1, sk1) = RegisteredKey::fresh(1, &mut rng);
         // Adversary "knows" sk1 (e.g. malicious PKI / key reuse) and re-registers it.
-        let (rk2, _) = RegisteredKey::new(2, &sk1, &mut rng);
-        let registry = vec![rk1.clone(), rk2];
-        assert!(verify_pki(&registry).is_err());
+        let rk2 = RegisteredKey::new(2, &sk1, &mut rng);
+        assert!(verify_pki(&[rk1.clone(), rk2]).is_err());
 
         // Negated key.
-        let (rk3, _) = RegisteredKey::new(3, &(-sk1), &mut rng);
-        let registry = vec![rk1, rk3];
-        assert!(verify_pki(&registry).is_err());
+        let rk3 = RegisteredKey::new(3, &(-sk1), &mut rng);
+        assert!(verify_pki(&[rk1, rk3]).is_err());
+    }
+
+    #[test]
+    fn small_order_component_rejected() {
+        // A `PK` with a 2-torsion component is on-curve but not in the
+        // prime-order subgroup.  Schnorr c-grinding would let an adversary
+        // pass the PoK with such a key, so the verifier must also enforce
+        // subgroup membership.  Jubjub's full 2-torsion is `(0, -1)`.
+        use crate::curves::Fp;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let (rk, _) = RegisteredKey::fresh(1, &mut rng);
+        let two_torsion = GinAffine::new_unchecked(Fp::from(0u64), -Fp::from(1u64));
+        assert!(two_torsion.is_on_curve());
+        assert!(!two_torsion.is_in_correct_subgroup_assuming_on_curve());
+        let bad_pk = (GinProj::from(rk.pk) + GinProj::from(two_torsion)).into_affine();
+        let bad = RegisteredKey {
+            id: 1,
+            pk: bad_pk,
+            pok: rk.pok.clone(),
+        };
+        assert!(matches!(
+            bad.verify(),
+            Err(GoldenError::PublicKeyNotInSubgroup { party: 1 })
+        ));
     }
 }

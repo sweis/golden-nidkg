@@ -36,6 +36,7 @@ use crate::schnorr::RegisteredKey;
 use crate::shamir;
 use crate::transcript::TranscriptExt;
 use crate::vss;
+use crate::zk::bp_r1cs::VerificationCheck;
 use crate::zk::evrf_circuit::EvrfPeerInputs;
 use crate::zk::evrf_proof::{
     collect_evrf_check, prove_evrf_batch, verify_evrf_batch, verify_evrf_checks, BatchPublicInputs,
@@ -44,7 +45,7 @@ use crate::zk::evrf_proof::{
 use crate::zk::ZkParams;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::Zero;
-use ark_std::rand::Rng;
+use ark_std::rand::{CryptoRng, Rng};
 use ark_std::UniformRand;
 use std::collections::BTreeMap;
 
@@ -91,8 +92,9 @@ pub struct Dealing {
     pub proof: EvrfProof,
 }
 
-/// State the dealer keeps secret — its own share and ω.
-#[derive(Clone)]
+/// State the dealer keeps secret — its own Shamir share `f_i(i)`.
+/// Zeroized on drop.
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct DealingPrivate {
     pub own_share: Fp,
 }
@@ -108,14 +110,16 @@ pub struct DkgOutput {
 /// Round 0 — `Share + Encrypt + Prove` for one dealer.
 ///
 /// `omega` defaults to a fresh random secret; pass `Some(Fp::zero())` for
-/// proactive refresh (Section 5.2).
+/// proactive refresh (Section 5.2).  `rng` must be cryptographically secure
+/// (it samples the dealer's secret polynomial, the broadcast nonce, and the
+/// Bulletproofs blinding factors).
 pub fn create_dealing(
     me: &RegisteredKey,
     sk: &Fs,
     cfg: &DkgConfig,
     pki: &BTreeMap<u32, GinAffine>,
     zk: &ZkParams,
-    rng: &mut impl Rng,
+    rng: &mut (impl Rng + CryptoRng),
     omega: Option<Fp>,
 ) -> GoldenResult<(Dealing, DealingPrivate)> {
     if !pki.contains_key(&me.id) {
@@ -180,7 +184,7 @@ pub fn refresh_dealing(
     cfg: &DkgConfig,
     pki: &BTreeMap<u32, GinAffine>,
     zk: &ZkParams,
-    rng: &mut impl Rng,
+    rng: &mut (impl Rng + CryptoRng),
 ) -> GoldenResult<(Dealing, DealingPrivate)> {
     create_dealing(me, sk, cfg, pki, zk, rng, Some(Fp::zero()))
 }
@@ -212,26 +216,49 @@ pub fn verify_dealing(
 /// MSM (Section 5.3 of the paper).  If the batch fails, the already-collected
 /// per-dealing checks are run individually so the offender can be named —
 /// without rebuilding the circuits.
+///
+/// Deterministic: the batch combiners are derived from the dealings by
+/// Fiat-Shamir, so every observer computes the same verdict.  The per-dealing
+/// circuit reconstruction (the bulk of the work besides the final MSM) runs in
+/// parallel under `--features parallel`.
 pub fn verify_dealings(
     dealings: &BTreeMap<u32, Dealing>,
     cfg: &DkgConfig,
     pki: &BTreeMap<u32, GinAffine>,
     zk: &ZkParams,
     expect_zero_secret: bool,
-    rng: &mut impl Rng,
 ) -> GoldenResult<()> {
+    let collect = |d: &Dealing| -> GoldenResult<Option<(u32, VerificationCheck)>> {
+        let pubs = check_dealing_structure(d, cfg, pki, expect_zero_secret)?;
+        Ok(collect_evrf_check(zk, &cfg.sid, &pubs, &d.proof)
+            .map_err(evrf_err(d.dealer))?
+            .map(|c| (d.dealer, c)))
+    };
+    // Run the per-dealing circuit reconstruction (independent across dealings)
+    // in parallel.  The collected list is in dealer-id order so the FS-derived
+    // batch combiners are deterministic across verifiers.
+    #[cfg(feature = "parallel")]
+    let collected: Vec<_> = {
+        use rayon::prelude::*;
+        dealings
+            .values()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(collect)
+            .collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let collected: Vec<_> = dealings.values().map(collect).collect();
+
     let mut checks = Vec::with_capacity(dealings.len());
     let mut dealer_ids = Vec::with_capacity(dealings.len());
-    for d in dealings.values() {
-        let pubs = check_dealing_structure(d, cfg, pki, expect_zero_secret)?;
-        if let Some(c) =
-            collect_evrf_check(zk, &cfg.sid, &pubs, &d.proof).map_err(evrf_err(d.dealer))?
-        {
+    for r in collected {
+        if let Some((dealer, c)) = r? {
+            dealer_ids.push(dealer);
             checks.push(c);
-            dealer_ids.push(d.dealer);
         }
     }
-    if verify_evrf_checks(zk, &checks, rng).is_ok() {
+    if verify_evrf_checks(zk, &checks).is_ok() {
         return Ok(());
     }
     // Batch failed — re-verify the already-collected checks individually so
@@ -248,8 +275,7 @@ pub fn verify_dealings(
 fn evrf_err<E: std::fmt::Display>(dealer: u32) -> impl Fn(E) -> GoldenError {
     move |e| GoldenError::EvrfProofFailed {
         dealer,
-        recipient: 0,
-        reason: format!("{e}"),
+        reason: e.to_string(),
     }
 }
 
@@ -277,6 +303,17 @@ fn check_dealing_structure(
     if expect_zero_secret && !dealing.commitment[0].is_zero() {
         return Err(GoldenError::NonZeroRefreshSecret { dealer: j });
     }
+    // BLS12-381 G1's cofactor has small prime factors (3, 11, …).  An
+    // off-subgroup `A_l` or `R_{jk}` lets a malicious dealer publish a dealing
+    // whose `g^z = R + X` check and eVRF proof both pass (after grinding the
+    // small-order component to cancel) while the recipient's locally
+    // re-derived `R' = g_out^r` mismatches — a false complaint.  Reject any
+    // off-curve or off-subgroup group element up front.
+    for a in &dealing.commitment {
+        if !is_in_gout_subgroup(a) {
+            return Err(GoldenError::ElementNotInSubgroup { dealer: j });
+        }
+    }
     let pk_j = pki.get(&j).ok_or(GoldenError::PartyNotInPki { id: j })?;
     // The dealer must send exactly one ciphertext for every party except itself.
     let mut peers = Vec::with_capacity(pki.len().saturating_sub(1));
@@ -288,13 +325,16 @@ fn check_dealing_structure(
                 dealer: j,
                 recipient: k,
             })?;
+        if !is_in_gout_subgroup(&ct.r_commit) {
+            return Err(GoldenError::ElementNotInSubgroup { dealer: j });
+        }
         // Ciphertext consistency: g^z == R · X_{jk}.  This is the cheap
         // public check from Figure 4 line 9 — perform it before the eVRF
         // proof so a corrupted ciphertext is rejected without paying for the
         // SNARK verification.
-        let x_jk = vss::share_commitment(&dealing.commitment, k);
+        let x_jk = vss::share_commitment_proj(&dealing.commitment, k);
         let lhs = gout_mul(&ct.z);
-        let rhs = (GoutProj::from(ct.r_commit) + GoutProj::from(x_jk)).into_affine();
+        let rhs = (GoutProj::from(ct.r_commit) + x_jk).into_affine();
         if lhs != rhs {
             return Err(GoldenError::CiphertextCheckFailed {
                 dealer: j,
@@ -325,6 +365,13 @@ fn check_dealing_structure(
     })
 }
 
+/// `G_out` (BLS12-381 G1) prime-order subgroup membership.  Defence-in-depth:
+/// `arkworks::CanonicalDeserialize` performs this on deserialization, but the
+/// library cannot assume callers deserialized rather than constructed in place.
+fn is_in_gout_subgroup(p: &GoutAffine) -> bool {
+    p.is_zero() || (p.is_on_curve() && p.is_in_correct_subgroup_assuming_on_curve())
+}
+
 /// Round 1 — decrypt + aggregate.  Caller must have verified all dealings
 /// (incl. its own) with [`verify_dealing`] first.
 pub fn complete(
@@ -343,10 +390,12 @@ pub fn complete(
         )));
     }
     let mut secret_share = own.own_share;
-    let mut pk_proj = GoutProj::zero();
-    let mut pk_share_acc: BTreeMap<u32, GoutProj> =
-        pki.keys().map(|&l| (l, GoutProj::zero())).collect();
-
+    // Aggregate the Feldman commitments coefficient-wise.  Since
+    //   PK_l = ∏_j X_{jl} = ∏_j ∏_m A_{j,m}^{l^m} = ∏_m (∏_j A_{j,m})^{l^m},
+    // computing `agg[m] = ∏_j A_{j,m}` once and Horner-ing over `agg` turns the
+    // per-recipient cost from `O(n·t)` to `O(t)` group ops (`O(n·t)` total
+    // rather than `O(n²·t)`).
+    let mut agg = vec![GoutProj::zero(); cfg.t as usize];
     for (j, dealing) in dealings {
         if *j != me.id {
             let pk_j = &pki[j];
@@ -370,18 +419,22 @@ pub fn complete(
             }
             secret_share += ct.z - pad.r;
         }
-        pk_proj += GoutProj::from(dealing.commitment[0]);
-        for (&l, acc) in pk_share_acc.iter_mut() {
-            *acc += GoutProj::from(vss::share_commitment(&dealing.commitment, l));
+        for (m, a) in agg.iter_mut().enumerate() {
+            *a += GoutProj::from(dealing.commitment[m]);
         }
     }
-    let public_key = pk_proj.into_affine();
-    let public_key_shares = pk_share_acc
-        .into_iter()
-        .map(|(l, v)| (l, v.into_affine()))
+    let agg = GoutProj::normalize_batch(&agg);
+    let shares_proj: Vec<GoutProj> = pki
+        .keys()
+        .map(|&l| vss::share_commitment_proj(&agg, l))
+        .collect();
+    let public_key_shares = pki
+        .keys()
+        .copied()
+        .zip(GoutProj::normalize_batch(&shares_proj))
         .collect();
     Ok(DkgOutput {
-        public_key,
+        public_key: agg[0],
         public_key_shares,
         secret_share,
     })

@@ -348,7 +348,6 @@ impl<'g> Verifier<'g> {
             ));
         }
         let m = self.n_committed;
-        let (_g_vec, _h_vec) = self.gens.share(n);
 
         self.transcript.append_u64(b"m", m as u64);
         self.transcript.append_gout(b"A_I", &proof.a_i);
@@ -489,26 +488,16 @@ impl VerificationCheck {
     /// [`verify_batch`], this does **not** need a random combiner because
     /// there is nothing to combine — a single check is verified directly.
     pub fn verify(&self, gens: &BpGens) -> Result<(), String> {
-        let n = self.g_scalars.len();
-        let (g_vec, h_vec) = gens.share(n);
-        let cap = 2 * n + self.extra_bases.len() + 2;
-        let mut bases = Vec::with_capacity(cap);
-        let mut scalars = Vec::with_capacity(cap);
-        bases.extend_from_slice(g_vec);
-        scalars.extend_from_slice(&self.g_scalars);
-        bases.extend_from_slice(h_vec);
-        scalars.extend_from_slice(&self.h_scalars);
-        bases.push(gens.b);
-        scalars.push(self.b_scalar);
-        bases.push(gens.b_blinding);
-        scalars.push(self.b_blinding_scalar);
-        bases.extend_from_slice(&self.extra_bases);
-        scalars.extend_from_slice(&self.extra_scalars);
-        if msm(&bases, &scalars).is_zero() {
-            Ok(())
-        } else {
-            Err("R1CS verification failed".into())
-        }
+        run_check_msm(
+            gens,
+            &self.g_scalars,
+            &self.h_scalars,
+            self.b_scalar,
+            self.b_blinding_scalar,
+            self.extra_bases.iter().copied(),
+            self.extra_scalars.iter().copied(),
+            self.extra_bases.len(),
+        )
     }
 }
 
@@ -526,54 +515,97 @@ pub fn verify_batch(
     checks: &[VerificationCheck],
     rng: &mut impl Rng,
 ) -> Result<(), String> {
-    if checks.is_empty() {
+    let Some((first, rest)) = checks.split_first() else {
         return Ok(());
-    }
-    let n = checks[0].g_scalars.len();
+    };
+    let n = first.g_scalars.len();
     if checks
         .iter()
         .any(|c| c.g_scalars.len() != n || c.h_scalars.len() != n)
     {
         return Err("verify_batch: heterogeneous gens widths".into());
     }
-    let (g_vec, h_vec) = gens.share(n);
-    let r: Vec<Fp> = (0..checks.len()).map(|_| Fp::rand(rng)).collect();
-
-    let mut g_acc = vec![Fp::zero(); n];
-    let mut h_acc = vec![Fp::zero(); n];
-    let mut b_acc = Fp::zero();
-    let mut bb_acc = Fp::zero();
+    // Pin `r_0 = 1`: with `k` checks only `k-1` random combiners are needed,
+    // saving `2n + |extra_0| + 2` field mults for the first check.
+    let mut g_acc = first.g_scalars.clone();
+    let mut h_acc = first.h_scalars.clone();
+    let mut b_acc = first.b_scalar;
+    let mut bb_acc = first.b_blinding_scalar;
     let extra_len: usize = checks.iter().map(|c| c.extra_bases.len()).sum();
     let mut extra_bases = Vec::with_capacity(extra_len);
     let mut extra_scalars = Vec::with_capacity(extra_len);
-    for (chk, ri) in checks.iter().zip(&r) {
-        for i in 0..n {
-            g_acc[i] += *ri * chk.g_scalars[i];
-            h_acc[i] += *ri * chk.h_scalars[i];
-        }
-        b_acc += *ri * chk.b_scalar;
-        bb_acc += *ri * chk.b_blinding_scalar;
+    extra_bases.extend_from_slice(&first.extra_bases);
+    extra_scalars.extend_from_slice(&first.extra_scalars);
+    for chk in rest {
+        let ri = Fp::rand(rng);
+        accumulate_weighted(&mut g_acc, &chk.g_scalars, ri);
+        accumulate_weighted(&mut h_acc, &chk.h_scalars, ri);
+        b_acc += ri * chk.b_scalar;
+        bb_acc += ri * chk.b_blinding_scalar;
         extra_bases.extend_from_slice(&chk.extra_bases);
-        extra_scalars.extend(chk.extra_scalars.iter().map(|s| *ri * s));
+        extra_scalars.extend(chk.extra_scalars.iter().map(|s| ri * s));
     }
+    run_check_msm(
+        gens,
+        &g_acc,
+        &h_acc,
+        b_acc,
+        bb_acc,
+        extra_bases.into_iter(),
+        extra_scalars.into_iter(),
+        extra_len,
+    )
+}
 
-    let cap = 2 * n + extra_bases.len() + 2;
+/// `acc[i] += w · v[i]` — parallel under `--features parallel` (the loop is
+/// `O(n)` field ops where `n` is the gens width, ~8 k–32 k).
+#[cfg(feature = "parallel")]
+fn accumulate_weighted(acc: &mut [Fp], v: &[Fp], w: Fp) {
+    use rayon::prelude::*;
+    acc.par_iter_mut()
+        .zip(v.par_iter())
+        .for_each(|(a, x)| *a += w * x);
+}
+#[cfg(not(feature = "parallel"))]
+fn accumulate_weighted(acc: &mut [Fp], v: &[Fp], w: Fp) {
+    for (a, x) in acc.iter_mut().zip(v) {
+        *a += w * x;
+    }
+}
+
+/// Assemble and evaluate the verification MSM `G^g · H^h · B^b · B_b^bb ·
+/// ∏ extra_base^extra_scalar == 0`.  Shared by [`VerificationCheck::verify`]
+/// and [`verify_batch`].
+#[allow(clippy::too_many_arguments)]
+fn run_check_msm(
+    gens: &BpGens,
+    g_scalars: &[Fp],
+    h_scalars: &[Fp],
+    b_scalar: Fp,
+    b_blinding_scalar: Fp,
+    extra_bases: impl Iterator<Item = GoutAffine>,
+    extra_scalars: impl Iterator<Item = Fp>,
+    extra_len: usize,
+) -> Result<(), String> {
+    let n = g_scalars.len();
+    let (g_vec, h_vec) = gens.share(n);
+    let cap = 2 * n + extra_len + 2;
     let mut bases = Vec::with_capacity(cap);
     let mut scalars = Vec::with_capacity(cap);
     bases.extend_from_slice(g_vec);
-    scalars.extend_from_slice(&g_acc);
+    scalars.extend_from_slice(g_scalars);
     bases.extend_from_slice(h_vec);
-    scalars.extend_from_slice(&h_acc);
+    scalars.extend_from_slice(h_scalars);
     bases.push(gens.b);
-    scalars.push(b_acc);
+    scalars.push(b_scalar);
     bases.push(gens.b_blinding);
-    scalars.push(bb_acc);
-    bases.extend_from_slice(&extra_bases);
-    scalars.extend_from_slice(&extra_scalars);
+    scalars.push(b_blinding_scalar);
+    bases.extend(extra_bases);
+    scalars.extend(extra_scalars);
     if msm(&bases, &scalars).is_zero() {
         Ok(())
     } else {
-        Err("R1CS batch verification failed".into())
+        Err("R1CS verification failed".into())
     }
 }
 

@@ -157,7 +157,8 @@ Severity: needs verification against gnark internals; flagged as a question.
 
 ### Where golden-nidkg is weaker
 * **Verification time** — Bulletproofs is structurally `O(N)`-verifier;
-  PLONK is `O(1)`.  Mitigated by batch-verification of dealings (TODO).
+  PLONK is `O(1)`.  Mitigated by batch-verification of dealings
+  (`verify_dealings`); the residual gap is the single shared-generator MSM.
 * **Proof size** — `O(log N)` (~1.8 kB) vs constant (~0.6 kB).
 * **Trusted setup** is *not needed* in golden-nidkg, which is the Bulletproofs
   trade-off the paper made deliberately (Section 3.4).

@@ -81,15 +81,25 @@ round-trip and rejects a tampered `R`.
 | Operation              | n=3, t=2 | n=5, t=4 | Notes |
 |------------------------|----------|----------|-------|
 | ZK CRS setup           | ~1.4 s   | ~3 s     | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
-| Dealing (Round 0)      | ~3.2 s   | ~5.6 s   | One batched eVRF proof per dealer. |
-| Verify one dealing     | ~140 ms  | ~220 ms  | Single MSM. |
+| Dealing (Round 0)      | ~3.4 s   | ~5.6 s   | One batched eVRF proof per dealer. |
+| Verify one dealing     | ~150 ms  | ~250 ms  | Single MSM. |
+| Verify all `n` (batch) | ~80 ms/d | ~130 ms/d| `verify_dealings` — one MSM, §5.3. |
 | Round 1                | <1 ms    | <1 ms    | |
 | Whole demo             | ~25 s    | ~70 s    | Incl. setup, 2× DKG (init + refresh). |
 
-The implementation uses the *batched* protocol from §5.3 of the paper: one
-Bulletproofs proof per dealer covers all `n-1` evaluations, sharing the
-dealer's `sk` bit decomposition and `g_in^{sk}` gadget.  For `n=5` this is
-≈13.4 k mul gates (16 384 generator pairs); each additional recipient adds
-~3.1 k gates.  The `R_eVRF` circuit uses 3-bit-window scalar multiplication
-(≈3.4 mul gates per scalar bit) and a chained `< p` comparison to make the
-`int(S.x)` decomposition canonical (see `BUGS.md §10`).
+The implementation uses the *batched* protocol from §5.3 of the paper:
+
+* **batched proving** — one Bulletproofs proof per dealer covers all `n-1`
+  evaluations, sharing the dealer's `sk` bit decomposition and `g_in^{sk}`
+  gadget.  For `n=5` this is ≈13.4 k mul gates (16 384 generator pairs); each
+  additional recipient adds ~3.1 k gates.
+* **batched verification** — `verify_dealings()` collects all dealers'
+  verification MSMs and verifies them with a single random-linear-combination
+  MSM over the shared `G[]/H[]` Bulletproofs generators.
+
+The `R_eVRF` circuit uses 3-bit-window scalar multiplication (≈3.4 mul gates
+per scalar bit) and a chained `< p` comparison to make the `int(S.x)`
+decomposition canonical (see `BUGS.md §10`).
+
+A side-by-side comparison with `f3rmion/fy/golden` (a Go implementation of
+Golden over BN254 + Baby Jubjub + gnark/PLONK) is in `COMPARISON.md`.

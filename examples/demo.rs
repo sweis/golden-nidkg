@@ -15,7 +15,7 @@
 use ark_ec::AffineRepr;
 use golden_nidkg::curves::{gout_mul, Fp};
 use golden_nidkg::dkg::{
-    check_output, complete, create_dealing, derive_session_id, refresh_dealing, verify_dealing,
+    check_output, complete, create_dealing, derive_session_id, refresh_dealing, verify_dealings,
     DkgConfig,
 };
 use golden_nidkg::schnorr::{verify_pki, RegisteredKey};
@@ -31,7 +31,7 @@ fn main() {
     let t: u32 = args
         .get(2)
         .and_then(|s| s.parse().ok())
-        .unwrap_or((n + 1) / 2 + 1);
+        .unwrap_or(n.div_ceil(2) + 1);
     let quick = args.get(3).map(|s| s == "quick").unwrap_or(false);
     assert!(t >= 1 && t <= n, "require 1 ≤ t ≤ n");
 
@@ -166,9 +166,7 @@ fn main() {
         refresh_dealings.insert(rk.id, d);
         refresh_privates.insert(rk.id, p);
     }
-    for d in refresh_dealings.values() {
-        verify_dealing(d, &cfg2, &pki, &zk, true).expect("refresh verify");
-    }
+    verify_dealings(&refresh_dealings, &cfg2, &pki, &zk, true, &mut rng).expect("refresh verify");
     let mut new_outputs = BTreeMap::new();
     for rk in &registry {
         let delta = complete(

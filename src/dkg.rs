@@ -28,7 +28,7 @@
 //!   PK_l ← ∏_j X_{jl}
 //! ```
 
-use crate::curves::{gout_mul, Fp, Fs, GinAffine, GoutAffine, GoutProj};
+use crate::curves::{gout_mul, is_in_prime_subgroup, Fp, Fs, GinAffine, GoutAffine, GoutProj};
 use crate::errors::{GoldenError, GoldenResult};
 use crate::evrf::{eval_pad, Beta, SessionId};
 use crate::hash_to_curve::{h1, h2};
@@ -43,11 +43,12 @@ use crate::zk::evrf_proof::{
     EvrfProof,
 };
 use crate::zk::ZkParams;
-use ark_ec::{AffineRepr, CurveGroup};
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::Zero;
 use ark_std::rand::{CryptoRng, Rng};
 use ark_std::UniformRand;
 use std::collections::BTreeMap;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Static configuration for one DKG session.
 #[derive(Clone, Debug)]
@@ -94,12 +95,17 @@ pub struct Dealing {
 
 /// State the dealer keeps secret — its own Shamir share `f_i(i)`.
 /// Zeroized on drop.
-#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DealingPrivate {
     pub own_share: Fp,
 }
 
 /// Joint DKG output.
+///
+/// `secret_share` is the party's long-term threshold key share.  The struct
+/// keeps `Debug`/`PartialEq` for test convenience and is *not* zeroize-on-drop
+/// (its lifetime is the application's to manage — wrap it in
+/// `zeroize::Zeroizing` if it should be scrubbed when it goes out of scope).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DkgOutput {
     pub public_key: GoutAffine,
@@ -129,7 +135,7 @@ pub fn create_dealing(
     // `Polynomial` zeroizes its coefficients on drop; wrap `shares` so the
     // evaluated points are scrubbed too rather than left in freed heap memory.
     let (poly, shares) = shamir::share(omega, cfg.n, cfg.t, rng);
-    let shares = zeroize::Zeroizing::new(shares);
+    let shares = Zeroizing::new(shares);
     let commitment = vss::commit(&poly);
     let mut msg = [0u8; 32];
     rng.fill(&mut msg);
@@ -273,8 +279,10 @@ pub fn verify_dealings(
     for (dealer, check) in dealer_ids.iter().zip(&checks) {
         check.verify(&zk.gens).map_err(evrf_err(*dealer))?;
     }
+    // Unreachable: the FS-derived combiners are deterministic, so a batch
+    // that fails has at least one failing individual check.
     Err(GoldenError::Internal(
-        "batch verification failed but all individual verifications passed (transient?)".into(),
+        "batch verification failed but every individual check passed".into(),
     ))
 }
 
@@ -315,9 +323,9 @@ fn check_dealing_structure(
     // whose `g^z = R + X` check and eVRF proof both pass (after grinding the
     // small-order component to cancel) while the recipient's locally
     // re-derived `R' = g_out^r` mismatches — a false complaint.  Reject any
-    // off-curve or off-subgroup group element up front.
+    // off-curve or off-subgroup group element up front (BUGS.md §12).
     for a in &dealing.commitment {
-        if !is_in_gout_subgroup(a) {
+        if !is_in_prime_subgroup(a) {
             return Err(GoldenError::ElementNotInSubgroup { dealer: j });
         }
     }
@@ -332,16 +340,17 @@ fn check_dealing_structure(
                 dealer: j,
                 recipient: k,
             })?;
-        if !is_in_gout_subgroup(&ct.r_commit) {
+        if !is_in_prime_subgroup(&ct.r_commit) {
             return Err(GoldenError::ElementNotInSubgroup { dealer: j });
         }
         // Ciphertext consistency: g^z == R · X_{jk}.  This is the cheap
         // public check from Figure 4 line 9 — perform it before the eVRF
         // proof so a corrupted ciphertext is rejected without paying for the
-        // SNARK verification.
+        // SNARK verification.  Compare in projective form (`Projective::eq`
+        // cross-multiplies) to skip the affine-normalisation inversion.
         let x_jk = vss::share_commitment_proj(&dealing.commitment, k);
-        let lhs = gout_mul(&ct.z);
-        let rhs = (GoutProj::from(ct.r_commit) + x_jk).into_affine();
+        let lhs = GoutProj::generator() * ct.z;
+        let rhs = x_jk + ct.r_commit;
         if lhs != rhs {
             return Err(GoldenError::CiphertextCheckFailed {
                 dealer: j,
@@ -370,13 +379,6 @@ fn check_dealing_structure(
         beta: cfg.beta.0,
         peers,
     })
-}
-
-/// `G_out` (BLS12-381 G1) prime-order subgroup membership.  Defence-in-depth:
-/// `arkworks::CanonicalDeserialize` performs this on deserialization, but the
-/// library cannot assume callers deserialized rather than constructed in place.
-fn is_in_gout_subgroup(p: &GoutAffine) -> bool {
-    p.is_zero() || (p.is_on_curve() && p.is_in_correct_subgroup_assuming_on_curve())
 }
 
 /// Round 1 — decrypt + aggregate.  Caller must have verified all dealings
@@ -427,7 +429,7 @@ pub fn complete(
             secret_share += ct.z - pad.r;
         }
         for (m, a) in agg.iter_mut().enumerate() {
-            *a += GoutProj::from(dealing.commitment[m]);
+            *a += dealing.commitment[m];
         }
     }
     let agg = GoutProj::normalize_batch(&agg);

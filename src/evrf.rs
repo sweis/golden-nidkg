@@ -68,8 +68,9 @@ pub struct EvrfPublicInputs {
     pub r_commit: GoutAffine, // R = g_out^r
 }
 
-/// Pad and its public commitment.
-#[derive(Clone, Copy, Debug)]
+/// Pad `r` (secret — it decrypts a Shamir share via `z − r`) and its public
+/// commitment `R = g_out^r`.  Zeroized on drop.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct PadOutput {
     pub r: Fp,
     pub r_commit: GoutAffine,
@@ -77,9 +78,9 @@ pub struct PadOutput {
 
 /// Witness data needed to prove `R_eVRF` (private to the dealer).
 ///
-/// Carries the dealer's PKI secret key `sk`, the DH shared secret `S` and the
-/// derived pad — all secret material.  Zeroized on drop; deliberately not
-/// `Debug` so it cannot be accidentally logged.
+/// Every field is derived from the dealer's PKI secret key `sk` and the DH
+/// shared secret `S`, so the whole struct is secret material.  Zeroized on
+/// drop; deliberately not `Debug` so it cannot be accidentally logged.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct EvrfWitness {
     pub sk: Fs,

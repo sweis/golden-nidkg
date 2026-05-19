@@ -18,20 +18,22 @@ pub fn commit(poly: &Polynomial) -> Vec<GoutAffine> {
 
 /// `X_j = ∏_{l=0}^{t-1} A_l^{j^l} = g_out^{f(j)}` — Feldman share commitment
 /// via Horner-in-the-exponent.
-///
-/// `j` is a small participant index, so each Horner step uses `mul_bigint`
-/// over a single u64 limb (≈⌈log₂ j⌉ doublings) rather than a full 255-bit
-/// scalar multiplication.
 pub fn share_commitment(commitment: &[GoutAffine], j: u32) -> GoutAffine {
     share_commitment_proj(commitment, j).into_affine()
 }
 
 /// Projective form of [`share_commitment`], for callers that immediately add
-/// the result into another accumulator.
+/// the result into another accumulator (skips the affine inversion).
+///
+/// Each Horner step multiplies the accumulator by the small participant
+/// index `j` (a u32).  `mul_bits_be` over `j`'s ≈⌈log₂ j⌉ bits is a plain
+/// double-and-add; `* Fp::from(j)` and `mul_bigint([j])` would both route
+/// through BLS12-381 G1's GLV decomposition, which heap-allocates a handful
+/// of `BigInt`s and iterates the full 128-bit half-width regardless of `j`.
 pub fn share_commitment_proj(commitment: &[GoutAffine], j: u32) -> GoutProj {
     let mut acc = GoutProj::from(commitment[commitment.len() - 1]);
     for a in commitment.iter().rev().skip(1) {
-        acc = acc.mul_bigint([j as u64]) + a;
+        acc = acc.mul_bits_be(ark_ff::BitIteratorBE::new([j as u64])) + a;
     }
     acc
 }
@@ -39,8 +41,7 @@ pub fn share_commitment_proj(commitment: &[GoutAffine], j: u32) -> GoutProj {
 /// `g_out^{f(j)} == X_j`?  Used by tests — protocol verification computes
 /// `X_j` directly from the commitment.
 pub fn verify_share(commitment: &[GoutAffine], j: u32, share: Fp) -> bool {
-    let lhs = (GoutProj::generator() * share).into_affine();
-    lhs == share_commitment(commitment, j)
+    GoutProj::generator() * share == share_commitment_proj(commitment, j)
 }
 
 #[cfg(test)]

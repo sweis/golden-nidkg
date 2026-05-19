@@ -6,7 +6,7 @@
 //! adversary register an honest party's `PK` as its own and recover that
 //! party's secret contribution from the broadcast transcript.
 
-use crate::curves::{Fs, GinAffine, GinProj};
+use crate::curves::{is_in_prime_subgroup, Fs, GinAffine, GinProj};
 use crate::errors::{GoldenError, GoldenResult};
 use crate::transcript::TranscriptExt;
 use ark_ec::{CurveGroup, PrimeGroup};
@@ -54,21 +54,19 @@ impl SchnorrPoK {
     /// has cofactor 8; a key with a low-order component would (a) make the
     /// eVRF DH secret `S = PK^{sk}` differ between the two parties and (b)
     /// permit grinding the Schnorr challenge to an order-multiple, so the
-    /// PoK alone does not exclude it.  arkworks' `CanonicalDeserialize`
-    /// performs this check on deserialization, but the library cannot assume
-    /// the application only gets keys via deserialization.
+    /// PoK alone does not exclude it (BUGS.md §12).
     pub fn verify(&self, id: u32, pk: &GinAffine) -> GoldenResult<()> {
         if pk.is_zero() {
             return Err(GoldenError::IdentityPublicKey { party: id });
         }
-        if !pk.is_on_curve() || !pk.is_in_correct_subgroup_assuming_on_curve() {
+        if !is_in_prime_subgroup(pk) {
             return Err(GoldenError::PublicKeyNotInSubgroup { party: id });
         }
         let c = challenge(id, pk, &self.commitment);
-        // g^s == R · PK^c
+        // g^s == R · PK^c — projective comparison, no affine normalisation.
         let lhs = GinProj::generator() * self.response;
-        let rhs = GinProj::from(self.commitment) + GinProj::from(*pk) * c;
-        if lhs.into_affine() == rhs.into_affine() {
+        let rhs = GinProj::from(*pk) * c + self.commitment;
+        if lhs == rhs {
             Ok(())
         } else {
             Err(GoldenError::SchnorrPoKFailed { party: id })

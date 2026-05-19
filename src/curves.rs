@@ -80,6 +80,22 @@ pub fn gin_mul(s: &Fs) -> GinAffine {
     (GinProj::generator() * s).into_affine()
 }
 
+/// Prime-order-subgroup membership for any arkworks affine point.
+///
+/// `arkworks::CanonicalDeserialize` performs this check on deserialization
+/// (`Validate::Yes` is the default), but the library cannot assume callers
+/// only obtain points by deserialization.  Both Jubjub (cofactor 8) and
+/// BLS12-381 G1 (cofactor `3·11²·10177²·…` — smallest prime factor **3**)
+/// have small-order subgroups, so an off-subgroup element is something a
+/// motivated adversary can grind for; see BUGS.md §12.  The per-element
+/// check is `O(log #E)` and cannot be soundly batched: a random-linear-
+/// combination batch test passes a bad order-`q` element with prob. `1/q`,
+/// so order-3 components survive a third of the time.
+#[inline]
+pub fn is_in_prime_subgroup<P: ark_serialize::Valid>(p: &P) -> bool {
+    p.check().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

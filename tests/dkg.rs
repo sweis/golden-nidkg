@@ -322,13 +322,12 @@ fn off_subgroup_commitment_rejected() {
     use ark_bls12_381::Fq;
     use ark_ff::Field;
     let off_subgroup = {
+        // The full curve has order `cofactor · p`, so a random on-curve point
+        // is in the prime-order subgroup with prob. 1/cofactor ≈ 2^{-126}.
         let mut x = Fq::from(2u64);
         loop {
-            // E(Fq): y² = x³ + 4.  Curve order is `cofactor · p`, so a random
-            // curve point is in the prime-order subgroup with prob. 1/cofactor.
-            if let Some(y) = (x * x * x + Fq::from(4u64)).sqrt() {
-                let p = golden_nidkg::GoutAffine::new_unchecked(x, y);
-                if p.is_on_curve() && !p.is_in_correct_subgroup_assuming_on_curve() {
+            if let Some(p) = golden_nidkg::GoutAffine::get_point_from_x_unchecked(x, false) {
+                if !p.is_in_correct_subgroup_assuming_on_curve() {
                     break p;
                 }
             }

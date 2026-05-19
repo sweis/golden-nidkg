@@ -9,7 +9,7 @@ use ark_ec::CurveGroup;
 use golden_nidkg::curves::{gout_mul, Fp, Fs, GinAffine, GoutProj};
 use golden_nidkg::dkg::{
     check_output, complete, create_dealing, derive_session_id, refresh_dealing, verify_dealing,
-    Dealing, DkgConfig,
+    verify_dealings, Dealing, DkgConfig,
 };
 use golden_nidkg::errors::GoldenError;
 use golden_nidkg::schnorr::{verify_pki, RegisteredKey};
@@ -108,9 +108,11 @@ fn dkg_end_to_end() {
     for (n, t) in [(2, 2), (3, 2), (5, 3), (7, 5)] {
         let mut net = TestNet::new(n, t);
         let (dealings, privates) = net.round0_all();
+        // Per-dealing and batched verification must agree.
         for d in dealings.values() {
             verify_dealing(d, &net.cfg, &net.pki, &net.zk, false).unwrap();
         }
+        verify_dealings(&dealings, &net.cfg, &net.pki, &net.zk, false, &mut net.rng).unwrap();
         let mut outs = BTreeMap::new();
         for rk in net.registry.clone() {
             let out = complete(

@@ -21,7 +21,7 @@ use crate::curves::{gout_mul, Fp, GinAffine, GoutAffine, GoutProj};
 use crate::errors::{GoldenError, GoldenResult};
 use crate::evrf::{EvrfWitness, SessionId};
 use crate::transcript::TranscriptExt;
-use crate::zk::bp_r1cs::{Prover, R1CSProof, Verifier};
+use crate::zk::bp_r1cs::{verify_batch, Prover, R1CSProof, VerificationCheck, Verifier};
 use crate::zk::evrf_circuit::{
     batch_gens_capacity, build_batch_circuit, default_lambda, EvrfPeerInputs,
 };
@@ -207,6 +207,23 @@ pub fn verify_evrf_batch(
     pubs: &BatchPublicInputs,
     proof: &EvrfProof,
 ) -> GoldenResult<()> {
+    match collect_evrf_check(params, sid, pubs, proof)? {
+        Some(check) => verify_batch(&params.gens, &[check], &mut ark_std::test_rng())
+            .map_err(GoldenError::Proof),
+        None => Ok(()), // InsecureQuick — already verified inside collect.
+    }
+}
+
+/// Compute the verification MSM coefficients for one dealing's eVRF proof
+/// without running the MSM, so several dealings can be batch-verified with
+/// [`verify_evrf_checks`].  Returns `None` for `InsecureQuick` proofs (which
+/// are verified inline and have no Bulletproofs MSM to batch).
+pub fn collect_evrf_check(
+    params: &ZkParams,
+    sid: &SessionId,
+    pubs: &BatchPublicInputs,
+    proof: &EvrfProof,
+) -> GoldenResult<Option<VerificationCheck>> {
     match (params.mode, proof) {
         (ZkMode::InsecureQuick, EvrfProof::InsecureQuick(proofs)) => {
             if proofs.len() != pubs.peers.len() {
@@ -226,7 +243,7 @@ pub fn verify_evrf_batch(
                     ));
                 }
             }
-            Ok(())
+            Ok(None)
         }
         (ZkMode::Full, EvrfProof::Full(p)) => {
             if pubs.peers.len() > params.max_peers {
@@ -253,10 +270,26 @@ pub fn verify_evrf_batch(
                 None,
                 params.lambda,
             );
-            verifier.verify(p).map_err(GoldenError::Proof)
+            verifier
+                .collect_check(p)
+                .map(Some)
+                .map_err(GoldenError::Proof)
         }
         _ => Err(GoldenError::Proof("proof/params mode mismatch".into())),
     }
+}
+
+/// Batch-verify several dealings' eVRF proofs by random linear combination of
+/// their verification MSMs (Section 5.3 of the paper).  Each `check` should
+/// come from [`collect_evrf_check`].  When the batch fails, this does *not*
+/// say which dealing was bad — call [`verify_evrf_batch`] per dealing to
+/// localise the fault.
+pub fn verify_evrf_checks(
+    params: &ZkParams,
+    checks: &[VerificationCheck],
+    rng: &mut impl Rng,
+) -> GoldenResult<()> {
+    verify_batch(&params.gens, checks, rng).map_err(GoldenError::Proof)
 }
 
 #[cfg(test)]

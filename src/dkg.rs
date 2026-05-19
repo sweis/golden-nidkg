@@ -37,7 +37,10 @@ use crate::shamir;
 use crate::transcript::TranscriptExt;
 use crate::vss;
 use crate::zk::evrf_circuit::EvrfPeerInputs;
-use crate::zk::evrf_proof::{prove_evrf_batch, verify_evrf_batch, BatchPublicInputs, EvrfProof};
+use crate::zk::evrf_proof::{
+    collect_evrf_check, prove_evrf_batch, verify_evrf_batch, verify_evrf_checks, BatchPublicInputs,
+    EvrfProof,
+};
 use crate::zk::ZkParams;
 use ark_ec::{AffineRepr, CurveGroup};
 use ark_ff::Zero;
@@ -186,6 +189,10 @@ pub fn refresh_dealing(
 ///
 /// `expect_zero_secret` should be `true` for refresh dealings (ω = 0 ⇒
 /// `A_{i,0}` is the identity).
+///
+/// Verifying many dealings at once?  Use [`verify_dealings`] — it batches the
+/// dealings' Bulletproofs verification MSMs into one (Section 5.3) for
+/// `~n×` faster verification.
 pub fn verify_dealing(
     dealing: &Dealing,
     cfg: &DkgConfig,
@@ -193,6 +200,65 @@ pub fn verify_dealing(
     zk: &ZkParams,
     expect_zero_secret: bool,
 ) -> GoldenResult<()> {
+    let pubs = check_dealing_structure(dealing, cfg, pki, expect_zero_secret)?;
+    verify_evrf_batch(zk, &cfg.sid, &pubs, &dealing.proof).map_err(|e| {
+        GoldenError::EvrfProofFailed {
+            dealer: dealing.dealer,
+            recipient: 0,
+            reason: format!("{e}"),
+        }
+    })
+}
+
+/// Public verification of *all* dealings for one round.
+///
+/// Performs the cheap per-dealing checks (commitment length, ciphertext
+/// consistency, structure) immediately so a misbehaving dealer is identified,
+/// then batches all the dealings' Bulletproofs verification MSMs into a single
+/// MSM (Section 5.3 of the paper).  If the batch fails, falls back to
+/// verifying each dealing individually so the offender can be named.
+pub fn verify_dealings(
+    dealings: &BTreeMap<u32, Dealing>,
+    cfg: &DkgConfig,
+    pki: &BTreeMap<u32, GinAffine>,
+    zk: &ZkParams,
+    expect_zero_secret: bool,
+    rng: &mut impl Rng,
+) -> GoldenResult<()> {
+    let mut checks = Vec::with_capacity(dealings.len());
+    for d in dealings.values() {
+        let pubs = check_dealing_structure(d, cfg, pki, expect_zero_secret)?;
+        if let Some(c) = collect_evrf_check(zk, &cfg.sid, &pubs, &d.proof).map_err(|e| {
+            GoldenError::EvrfProofFailed {
+                dealer: d.dealer,
+                recipient: 0,
+                reason: format!("{e}"),
+            }
+        })? {
+            checks.push(c);
+        }
+    }
+    if verify_evrf_checks(zk, &checks, rng).is_ok() {
+        return Ok(());
+    }
+    // Batch failed — re-verify each to localise the offender.
+    for d in dealings.values() {
+        verify_dealing(d, cfg, pki, zk, expect_zero_secret)?;
+    }
+    Err(GoldenError::Internal(
+        "batch verification failed but all individual verifications passed (transient?)".into(),
+    ))
+}
+
+/// Run the cheap structural / Feldman / ciphertext checks on a dealing and
+/// return the batched eVRF public inputs.  Shared between [`verify_dealing`]
+/// and [`verify_dealings`].
+fn check_dealing_structure(
+    dealing: &Dealing,
+    cfg: &DkgConfig,
+    pki: &BTreeMap<u32, GinAffine>,
+    expect_zero_secret: bool,
+) -> GoldenResult<BatchPublicInputs> {
     let j = dealing.dealer;
     if dealing.sid != cfg.sid {
         return Err(GoldenError::SessionMismatch { dealer: j });
@@ -249,21 +315,13 @@ pub fn verify_dealing(
         }
     }
     // Batched eVRF proof: one Bulletproofs proof for all `n-1` recipients.
-    let pubs = BatchPublicInputs {
+    Ok(BatchPublicInputs {
         pk1: *pk_j,
         h1m: h1(&cfg.sid.0, &dealing.msg),
         h2m: h2(&cfg.sid.0, &dealing.msg),
         beta: cfg.beta.0,
         peers,
-    };
-    verify_evrf_batch(zk, &cfg.sid, &pubs, &dealing.proof).map_err(|e| {
-        GoldenError::EvrfProofFailed {
-            dealer: j,
-            recipient: 0,
-            reason: format!("{e}"),
-        }
-    })?;
-    Ok(())
+    })
 }
 
 /// Round 1 — decrypt + aggregate.  Caller must have verified all dealings

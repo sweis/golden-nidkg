@@ -327,7 +327,38 @@ impl<'g> Verifier<'g> {
         Variable::Committed(i)
     }
 
-    pub fn verify(mut self, proof: &R1CSProof) -> Result<(), String> {
+    /// Verify a single proof.  Equivalent to `self.collect_check(proof)` then
+    /// running the resulting MSM.
+    pub fn verify(self, proof: &R1CSProof) -> Result<(), String> {
+        let gens = self.gens;
+        let chk = self.collect_check(proof)?;
+        let n = chk.g_scalars.len();
+        let (g_vec, h_vec) = gens.share(n);
+        let cap = 2 * n + chk.extra_bases.len() + 2;
+        let mut bases = Vec::with_capacity(cap);
+        let mut scalars = Vec::with_capacity(cap);
+        bases.extend_from_slice(g_vec);
+        scalars.extend_from_slice(&chk.g_scalars);
+        bases.extend_from_slice(h_vec);
+        scalars.extend_from_slice(&chk.h_scalars);
+        bases.push(gens.b);
+        scalars.push(chk.b_scalar);
+        bases.push(gens.b_blinding);
+        scalars.push(chk.b_blinding_scalar);
+        bases.extend_from_slice(&chk.extra_bases);
+        scalars.extend_from_slice(&chk.extra_scalars);
+        if msm(&bases, &scalars).is_zero() {
+            Ok(())
+        } else {
+            Err("R1CS verification failed".into())
+        }
+    }
+
+    /// Compute the verification MSM coefficients without running the MSM.
+    /// Splitting the coefficients this way lets [`verify_batch`] combine
+    /// several proofs that share the `G`, `H`, `B`, `B_b` generators into a
+    /// single MSM.
+    pub fn collect_check(mut self, proof: &R1CSProof) -> Result<VerificationCheck, String> {
         let n0 = self.n_mul;
         let n = n0.next_power_of_two().max(1);
         if n > self.gens.gens_capacity {
@@ -337,7 +368,7 @@ impl<'g> Verifier<'g> {
             ));
         }
         let m = self.n_committed;
-        let (g_vec, h_vec) = self.gens.share(n);
+        let (_g_vec, _h_vec) = self.gens.share(n);
 
         self.transcript.append_u64(b"m", m as u64);
         self.transcript.append_gout(b"A_I", &proof.a_i);
@@ -394,68 +425,147 @@ impl<'g> Verifier<'g> {
         //       == ∑(a·s_i)G_i + ∑(b·s_inv_i·y^{-i})H_i + a·b·Q − ∑u²L − ∑u^{-2}R
         // This is the single-phase analogue of the dalek combined check.
 
-        // We assemble a single MSM with all the bases.
-        //   coefficient_on_base · base, summed; should equal identity.
-        let cap = 2 * n + 2 * proof.ipp.l_vec.len() + m + 10;
-        let mut bases: Vec<GoutAffine> = Vec::with_capacity(cap);
-        let mut scalars: Vec<Fp> = Vec::with_capacity(cap);
-
-        // ── second check (P) terms ──
-        // A_I, A_O, S
-        bases.push(proof.a_i);
-        scalars.push(x);
-        bases.push(proof.a_o);
-        scalars.push(xx);
-        bases.push(proof.s);
-        scalars.push(xxx);
-        // V_j: only enter the t(x) check (handled below)
-
+        // We assemble a single MSM with all the bases.  The `G`, `H`, `B`,
+        // `B_b` scalars are returned separately so [`verify_batch`] can fuse
+        // several proofs.
         // G_i: x·y^{-i}·z_W_R_i  −  a·s_i
-        for i in 0..n {
-            bases.push(g_vec[i]);
-            scalars.push(x * y_inv_pows[i] * fl.w_r[i] - a * s[i]);
-        }
+        let g_scalars: Vec<Fp> = (0..n)
+            .map(|i| x * y_inv_pows[i] * fl.w_r[i] - a * s[i])
+            .collect();
         // H_i: y^{-i}·(x·z_W_L_i + z_W_O_i − y^i)  −  b·s_inv_i·y^{-i}
-        for i in 0..n {
-            bases.push(h_vec[i]);
-            scalars.push(y_inv_pows[i] * (x * fl.w_l[i] + fl.w_o[i] - y_pows[i] - b * s_inv(i)));
-        }
-        // L, R from the IPA
-        for i in 0..proof.ipp.l_vec.len() {
-            bases.push(proof.ipp.l_vec[i]);
-            scalars.push(u_sq[i]);
-            bases.push(proof.ipp.r_vec[i]);
-            scalars.push(u_inv_sq[i]);
-        }
-        // B_b: −e_blinding (from P) − r·t_x_blinding (from the t(x) check)
-        bases.push(self.gens.b_blinding);
-        scalars.push(-proof.e_blinding - r_chal * proof.t_x_blinding);
+        let h_scalars: Vec<Fp> = (0..n)
+            .map(|i| y_inv_pows[i] * (x * fl.w_l[i] + fl.w_o[i] - y_pows[i] - b * s_inv(i)))
+            .collect();
         // B: w·(t_x − a·b) (from Q^{t_x}, Q^{a·b})  +  r·(x²(δ + w_c) − t_x)
-        bases.push(self.gens.b);
-        scalars.push(w * (proof.t_x - a * b) + r_chal * (xx * (delta + fl.w_c) - proof.t_x));
+        let b_scalar = w * (proof.t_x - a * b) + r_chal * (xx * (delta + fl.w_c) - proof.t_x);
+        // B_b: −e_blinding (from P) − r·t_x_blinding (from the t(x) check)
+        let b_blinding_scalar = -proof.e_blinding - r_chal * proof.t_x_blinding;
 
-        // ── t(x) check terms (scaled by r_chal) ──
+        // Per-proof bases: A_I, A_O, S, T_*, V_*, IPA L/R.
+        let nx = m + 8 + 2 * proof.ipp.l_vec.len();
+        let mut extra_bases: Vec<GoutAffine> = Vec::with_capacity(nx);
+        let mut extra_scalars: Vec<Fp> = Vec::with_capacity(nx);
+        extra_bases.push(proof.a_i);
+        extra_scalars.push(x);
+        extra_bases.push(proof.a_o);
+        extra_scalars.push(xx);
+        extra_bases.push(proof.s);
+        extra_scalars.push(xxx);
+        for i in 0..proof.ipp.l_vec.len() {
+            extra_bases.push(proof.ipp.l_vec[i]);
+            extra_scalars.push(u_sq[i]);
+            extra_bases.push(proof.ipp.r_vec[i]);
+            extra_scalars.push(u_inv_sq[i]);
+        }
         for j in 0..m {
-            bases.push(self.v_commitments[j]);
-            scalars.push(r_chal * xx * fl.w_v[j]);
+            extra_bases.push(self.v_commitments[j]);
+            extra_scalars.push(r_chal * xx * fl.w_v[j]);
         }
-        bases.push(proof.t_1);
-        scalars.push(r_chal * x);
-        bases.push(proof.t_3);
-        scalars.push(r_chal * xxx);
-        bases.push(proof.t_4);
-        scalars.push(r_chal * xxx * x);
-        bases.push(proof.t_5);
-        scalars.push(r_chal * xxx * xx);
-        bases.push(proof.t_6);
-        scalars.push(r_chal * xxx * xxx);
+        extra_bases.push(proof.t_1);
+        extra_scalars.push(r_chal * x);
+        extra_bases.push(proof.t_3);
+        extra_scalars.push(r_chal * xxx);
+        extra_bases.push(proof.t_4);
+        extra_scalars.push(r_chal * xxx * x);
+        extra_bases.push(proof.t_5);
+        extra_scalars.push(r_chal * xxx * xx);
+        extra_bases.push(proof.t_6);
+        extra_scalars.push(r_chal * xxx * xxx);
 
-        let combined = msm(&bases, &scalars);
-        if combined.is_zero() {
-            Ok(())
-        } else {
-            Err("R1CS verification failed".into())
+        Ok(VerificationCheck {
+            g_scalars,
+            h_scalars,
+            b_scalar,
+            b_blinding_scalar,
+            extra_bases,
+            extra_scalars,
+        })
+    }
+}
+
+/// One proof's contribution to the verification MSM, split into the parts
+/// that hit the *shared* Bulletproofs generators (`G`, `H`, `B`, `B_b`) and
+/// the per-proof bases (commitments and IPA `L`/`R`).
+///
+/// Several `VerificationCheck`s can be combined with random weights into a
+/// single MSM by [`verify_batch`].
+pub struct VerificationCheck {
+    /// Scalars on `G[0..n]`.
+    pub g_scalars: Vec<Fp>,
+    /// Scalars on `H[0..n]`.
+    pub h_scalars: Vec<Fp>,
+    /// Scalar on `B = g_out`.
+    pub b_scalar: Fp,
+    /// Scalar on `B_blinding`.
+    pub b_blinding_scalar: Fp,
+    /// Per-proof bases (`A_I, A_O, S, T_*, V_*, IPA L/R`).
+    pub extra_bases: Vec<GoutAffine>,
+    /// Scalars for `extra_bases`.
+    pub extra_scalars: Vec<Fp>,
+}
+
+/// Batch-verify several proofs by random linear combination.
+///
+/// Each `check` represents one proof's verification equation `Σ c_j base_j =
+/// 0`.  Drawing fresh `r_i` and checking `Σ_i r_i · check_i = 0` accepts iff
+/// all checks are satisfied with overwhelming probability.  Because the bulk
+/// of each MSM is over the shared `G[0..n]`/`H[0..n]` generators, the batched
+/// MSM is `O(n + Σ_i |extra_i|)` instead of `O(Σ_i (n + |extra_i|))` — for
+/// small `extra` this is roughly a `k×` speed-up over verifying `k` proofs
+/// individually (Section 5.3 of the paper).
+pub fn verify_batch(
+    gens: &BpGens,
+    checks: &[VerificationCheck],
+    rng: &mut impl Rng,
+) -> Result<(), String> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let n = checks[0].g_scalars.len();
+    if checks
+        .iter()
+        .any(|c| c.g_scalars.len() != n || c.h_scalars.len() != n)
+    {
+        return Err("verify_batch: heterogeneous gens widths".into());
+    }
+    let (g_vec, h_vec) = gens.share(n);
+    let r: Vec<Fp> = (0..checks.len()).map(|_| Fp::rand(rng)).collect();
+
+    let mut g_acc = vec![Fp::zero(); n];
+    let mut h_acc = vec![Fp::zero(); n];
+    let mut b_acc = Fp::zero();
+    let mut bb_acc = Fp::zero();
+    let extra_len: usize = checks.iter().map(|c| c.extra_bases.len()).sum();
+    let mut extra_bases = Vec::with_capacity(extra_len);
+    let mut extra_scalars = Vec::with_capacity(extra_len);
+    for (chk, ri) in checks.iter().zip(&r) {
+        for i in 0..n {
+            g_acc[i] += *ri * chk.g_scalars[i];
+            h_acc[i] += *ri * chk.h_scalars[i];
         }
+        b_acc += *ri * chk.b_scalar;
+        bb_acc += *ri * chk.b_blinding_scalar;
+        extra_bases.extend_from_slice(&chk.extra_bases);
+        extra_scalars.extend(chk.extra_scalars.iter().map(|s| *ri * s));
+    }
+
+    let cap = 2 * n + extra_bases.len() + 2;
+    let mut bases = Vec::with_capacity(cap);
+    let mut scalars = Vec::with_capacity(cap);
+    bases.extend_from_slice(g_vec);
+    scalars.extend_from_slice(&g_acc);
+    bases.extend_from_slice(h_vec);
+    scalars.extend_from_slice(&h_acc);
+    bases.push(gens.b);
+    scalars.push(b_acc);
+    bases.push(gens.b_blinding);
+    scalars.push(bb_acc);
+    bases.extend_from_slice(&extra_bases);
+    scalars.extend_from_slice(&extra_scalars);
+    if msm(&bases, &scalars).is_zero() {
+        Ok(())
+    } else {
+        Err("R1CS batch verification failed".into())
     }
 }
 

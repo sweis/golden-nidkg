@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use golden_nidkg::curves::{gin_mul, Fs};
-use golden_nidkg::dkg::{create_dealing, derive_session_id, verify_dealing, DkgConfig};
+use golden_nidkg::dkg::{
+    create_dealing, derive_session_id, verify_dealing, verify_dealings, DkgConfig,
+};
 use golden_nidkg::evrf::{eval_pad, Beta, SessionId};
 use golden_nidkg::hash_to_curve::{h1, h2};
 use golden_nidkg::schnorr::{verify_pki, RegisteredKey};
@@ -118,7 +120,15 @@ fn main() {
     }
     let v = t0.elapsed();
     println!(
-        "Verify {n} dealings:        {v:?}   (≈{:?} per dealing)",
+        "Verify {n} dealings (one-by-one): {v:?}   (≈{:?} per dealing)",
+        v / n
+    );
+
+    let t0 = Instant::now();
+    verify_dealings(&dealings, &cfg, &pki, &zk_n, false, &mut rng).unwrap();
+    let v = t0.elapsed();
+    println!(
+        "Verify {n} dealings (batched):    {v:?}   (≈{:?} per dealing)",
         v / n
     );
 }

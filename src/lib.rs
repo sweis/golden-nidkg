@@ -30,8 +30,8 @@ pub mod zk;
 
 pub use curves::{Fp, Fs, GinAffine, GoutAffine};
 pub use dkg::{
-    complete, create_dealing, refresh_dealing, verify_dealing, Dealing, DealingPrivate, DkgConfig,
-    DkgOutput,
+    complete, create_dealing, refresh_dealing, verify_dealing, verify_dealings, Dealing,
+    DealingPrivate, DkgConfig, DkgOutput,
 };
 pub use errors::{GoldenError, GoldenResult};
 pub use evrf::{Beta, SessionId};

@@ -99,11 +99,9 @@ fn main() {
     println!("    Round 0 total: {:?}", r0_start.elapsed());
 
     // ── Public verification (any observer can do this) ──
-    println!("\n[4] Public verification: each party verifies every other party's dealing");
+    println!("\n[4] Public verification: any observer checks every dealing (batched MSM)");
     let v_start = Instant::now();
-    for (&j, d) in &dealings {
-        verify_dealing(d, &cfg, &pki, &zk, false).unwrap_or_else(|e| panic!("dealer {j}: {e}"));
-    }
+    verify_dealings(&dealings, &cfg, &pki, &zk, false, &mut rng).expect("verify");
     println!("    all {n} dealings verified in {:?}", v_start.elapsed());
 
     // ── Round 1: each party decrypts + aggregates ──

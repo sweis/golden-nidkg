@@ -63,7 +63,8 @@ download cost is excluded).
 | eVRF prove (1 peer)              | 3.3 s        | 7.9 s        | 2.4× faster |
 | eVRF verify (1 peer)             | 147 ms       | 3.0 ms       | **49× slower** |
 | Round 0 (n=3, 3 dealers)         | 10.3 s       | 49.8 s       | 4.8× faster |
-| Verify 3 dealings                | 484 ms       | 18 ms        | **27× slower** |
+| Verify 3 dealings (one-by-one)   | 463 ms       | 18 ms        | **26× slower** |
+| Verify 3 dealings (batched MSM)  | 249 ms       | —            | **14× slower** |
 | Proof size (1 peer)              | ≈ 1.8 kB     | 584 B        | 3.1× larger |
 
 Take-aways:
@@ -79,18 +80,21 @@ Take-aways:
   generator vectors.
 
 The verification gap is the area that warrants optimisation in golden-nidkg.
-Mitigations applied / considered:
+Mitigations applied:
 
-1. *Cache the constraint flattening* — the verifier rebuilds the circuit
-   (`build_batch_circuit`) and flattens it for each dealing; for a fixed `n`
-   the flattened matrices `W_*` only depend on the public points, so the
-   structure (but not the entries) could be cached.  Implemented partially via
-   pre-allocated MSM buffers.
-2. *Batch verification of multiple dealings' proofs* (§5.3 of the paper) —
-   take a random linear combination across the `n` dealers' verification MSMs
-   so the verifier pays one MSM of `2N` elements instead of `n` MSMs of `2N`.
-   ~`n×` speed-up.  *Not yet implemented (TODO).*
-3. *Parallel MSM* — already on under `--features parallel`.
+1. *Batch verification of multiple dealings' proofs* (§5.3 of the paper) —
+   `verify_dealings()` collects each dealing's verification coefficients,
+   takes a random linear combination, and runs **one** MSM over the shared
+   `G[0..n]/H[0..n]` generators plus a small per-proof tail.  Implemented
+   (`bp_r1cs::verify_batch`); ~1.9× faster at `n=3` and the savings grow
+   with `n` because the shared-generator MSM is amortised across dealers.
+2. *Parallel MSM and IPA fold* — on by default under `--features parallel`.
+3. *Pre-allocated MSM buffers, batched curve normalisation, cached offset
+   point* (`OnceLock`).
+
+Remaining gap is structural — closing it would require switching to a
+constant-size SNARK (and accepting a trusted setup, which the paper considered
+and rejected; Section 3.4).
 
 ## Discrepancies / observations about `fy/golden`
 

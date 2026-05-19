@@ -12,7 +12,6 @@
 
 use crate::curves::Fp;
 use ark_ff::{One, Zero};
-use std::collections::BTreeMap;
 use std::ops::{Add, Mul, Neg, Sub};
 
 /// A wire in the constraint system.
@@ -31,40 +30,42 @@ pub enum Variable {
 }
 
 /// A linear combination `∑ c_i · x_i + c_0`.
+///
+/// Stored as a flat `(variable, coefficient)` list rather than a map: every
+/// downstream consumer (`flatten`, `Assignments::eval`) treats repeated
+/// variables additively, so the dedup a map would buy is dead work — and the
+/// gadgets the `R_eVRF` circuit uses never produce repeats anyway.  This keeps
+/// circuit construction a `Vec::push` rather than a `BTreeMap` insert.
 #[derive(Clone, Debug, Default)]
 pub struct LinearCombination {
-    pub terms: BTreeMap<Variable, Fp>,
+    pub terms: Vec<(Variable, Fp)>,
 }
 
 impl LinearCombination {
     pub fn zero() -> Self {
-        Self {
-            terms: BTreeMap::new(),
-        }
+        Self { terms: Vec::new() }
     }
     pub fn constant(c: Fp) -> Self {
-        let mut t = BTreeMap::new();
-        if !c.is_zero() {
-            t.insert(Variable::One, c);
+        if c.is_zero() {
+            Self::zero()
+        } else {
+            Self {
+                terms: vec![(Variable::One, c)],
+            }
         }
-        Self { terms: t }
     }
     pub fn add_term(&mut self, v: Variable, c: Fp) {
-        if c.is_zero() {
-            return;
-        }
-        *self.terms.entry(v).or_insert_with(Fp::zero) += c;
-        if self.terms[&v].is_zero() {
-            self.terms.remove(&v);
+        if !c.is_zero() {
+            self.terms.push((v, c));
         }
     }
 }
 
 impl From<Variable> for LinearCombination {
     fn from(v: Variable) -> Self {
-        let mut t = BTreeMap::new();
-        t.insert(v, Fp::one());
-        Self { terms: t }
+        Self {
+            terms: vec![(v, Fp::one())],
+        }
     }
 }
 impl From<Fp> for LinearCombination {
@@ -76,9 +77,7 @@ impl From<Fp> for LinearCombination {
 impl Add<LinearCombination> for LinearCombination {
     type Output = Self;
     fn add(mut self, rhs: LinearCombination) -> Self {
-        for (v, c) in rhs.terms {
-            self.add_term(v, c);
-        }
+        self.terms.extend(rhs.terms);
         self
     }
 }
@@ -91,7 +90,7 @@ impl Sub<LinearCombination> for LinearCombination {
 impl Neg for LinearCombination {
     type Output = Self;
     fn neg(mut self) -> Self {
-        for c in self.terms.values_mut() {
+        for (_, c) in &mut self.terms {
             *c = -*c;
         }
         self
@@ -103,7 +102,7 @@ impl Mul<Fp> for LinearCombination {
         if s.is_zero() {
             return Self::zero();
         }
-        for c in self.terms.values_mut() {
+        for (_, c) in &mut self.terms {
             *c *= s;
         }
         self

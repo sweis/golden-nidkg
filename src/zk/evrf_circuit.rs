@@ -164,13 +164,8 @@ fn alloc_bits<CS: ConstraintSystem>(
 }
 
 /// Compute the next-power-of-two number of multiplication gates for the
-/// `R_eVRF` circuit at a given `lambda`, so callers can size `BpGens`.
-pub fn gens_capacity(lambda: usize) -> usize {
-    batch_gens_capacity(lambda, 1)
-}
-
-/// Compute the gens capacity for a *batched* circuit covering `peers`
-/// recipients.
+/// (batched) `R_eVRF` circuit covering `peers` recipients at a given
+/// `lambda`, so callers can size `BpGens`.
 pub fn batch_gens_capacity(lambda: usize, peers: usize) -> usize {
     // Per gadget cost (see gadgets.rs cost summary).  `scalar_mul_const`
     // uses 3-bit windows (≈10 muls per 3-bit chunk + ε).
@@ -202,7 +197,7 @@ mod tests {
     #[test]
     fn evrf_circuit_shape_and_proof_lambda_full() {
         let lambda = DEFAULT_LAMBDA;
-        let cap = gens_capacity(lambda);
+        let cap = batch_gens_capacity(lambda, 1);
         let gens = BpGens::new(cap);
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 

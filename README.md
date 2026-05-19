@@ -93,7 +93,3 @@ dealer's `sk` bit decomposition and `g_in^{sk}` gadget.  For `n=5` this is
 ~3.1 k gates.  The `R_eVRF` circuit uses 3-bit-window scalar multiplication
 (≈3.4 mul gates per scalar bit) and a chained `< p` comparison to make the
 `int(S.x)` decomposition canonical (see `BUGS.md §10`).
-
-## License
-
-MIT OR Apache-2.0.

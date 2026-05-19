@@ -150,16 +150,13 @@ impl InnerProductProof {
         ark_ff::batch_inversion(&mut u_inv);
         let u_sq: Vec<Fp> = u.iter().map(|x| x.square()).collect();
         let u_inv_sq: Vec<Fp> = u_inv.iter().map(|x| x.square()).collect();
-        // s_0 = ∏ u_i^{-1}; s_j for j>0 by flipping bits.
+        // s_0 = ∏ u_i^{-1}; s_j for j>0 by flipping the highest set bit.
         let mut s = Vec::with_capacity(n);
-        let s0: Fp = u_inv.iter().product();
-        s.push(s0);
+        s.push(u_inv.iter().product());
         for j in 1..n {
-            let lg_i = (32 - 1 - (j as u32).leading_zeros()) as usize;
-            let k = 1usize << lg_i;
-            // The bit `lg_i` flipped from 0 to 1 ⇒ multiply by u_{lg_n - 1 - lg_i}².
-            let u_lg_i_sq = u_sq[(lg_n - 1) - lg_i];
-            s.push(s[j - k] * u_lg_i_sq);
+            let lg_i = j.ilog2() as usize;
+            // Flipping bit `lg_i` from 0 to 1 multiplies by u_{lg_n − 1 − lg_i}².
+            s.push(s[j - (1 << lg_i)] * u_sq[(lg_n - 1) - lg_i]);
         }
         Ok((u_sq, u_inv_sq, s))
     }

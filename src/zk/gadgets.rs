@@ -50,17 +50,6 @@ impl ScalarVar {
             w: Some(v),
         }
     }
-    pub fn from_committed<CS: ConstraintSystem>(
-        cs: &CS,
-        v: crate::zk::r1cs::Variable,
-        witness: Option<Fp>,
-    ) -> Self {
-        let lc = LinearCombination::from(v);
-        Self {
-            lc: lc.clone(),
-            w: cs.eval(&lc).or(witness),
-        }
-    }
     pub fn add(&self, other: &Self) -> Self {
         Self {
             lc: self.lc.clone() + other.lc.clone(),
@@ -101,10 +90,6 @@ impl PointVar {
             y: ScalarVar::constant(p.y),
             w: Some(*p),
         }
-    }
-    pub fn from_xy(x: ScalarVar, y: ScalarVar) -> Self {
-        let w = x.w.zip(y.w).map(|(x, y)| GinAffine::new_unchecked(x, y));
-        Self { x, y, w }
     }
 }
 

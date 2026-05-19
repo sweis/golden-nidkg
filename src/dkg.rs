@@ -134,10 +134,10 @@ pub fn create_dealing(
     let mut ciphertexts = BTreeMap::new();
     let mut peers = Vec::new();
     let mut wits = Vec::new();
-    let mut own_share = Fp::zero();
+    let mut own_share = None;
     for (j, x_ij) in &shares {
         if *j == me.id {
-            own_share = *x_ij;
+            own_share = Some(*x_ij);
             continue;
         }
         let pk_j = pki.get(j).ok_or(GoldenError::PartyNotInPki { id: *j })?;
@@ -156,6 +156,10 @@ pub fn create_dealing(
         });
         wits.push(witness);
     }
+    // Participant ids double as Shamir indices, so they must lie in `1..=n`.
+    let own_share = own_share.ok_or_else(|| {
+        GoldenError::Internal(format!("dealer id {} must be in 1..={}", me.id, cfg.n))
+    })?;
     let pubs = BatchPublicInputs {
         pk1: me.pk,
         h1m: h1(&cfg.sid.0, &msg),

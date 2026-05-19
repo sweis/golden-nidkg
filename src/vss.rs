@@ -8,13 +8,12 @@ use crate::curves::{Fp, GoutAffine, GoutProj};
 use crate::shamir::Polynomial;
 use ark_ec::{CurveGroup, PrimeGroup};
 
-/// `C = (g_out^{a_0}, …, g_out^{a_{t-1}})`.
+/// `C = (g_out^{a_0}, …, g_out^{a_{t-1}})`.  Batch-normalised: one inversion
+/// for all `t` coefficients.
 pub fn commit(poly: &Polynomial) -> Vec<GoutAffine> {
     let g = GoutProj::generator();
-    poly.coeffs()
-        .iter()
-        .map(|c| (g * c).into_affine())
-        .collect()
+    let proj: Vec<GoutProj> = poly.coeffs().iter().map(|c| g * c).collect();
+    GoutProj::normalize_batch(&proj)
 }
 
 /// `X_j = ∏_{l=0}^{t-1} A_l^{j^l} = g_out^{f(j)}` — Feldman share commitment

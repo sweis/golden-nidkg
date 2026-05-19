@@ -285,6 +285,36 @@ This implementation defaults to the batched proof.
 
 ---
 
+## 11. Cross-implementation observations from `f3rmion/fy/golden`
+
+`f3rmion/fy/golden` (Go, BN254/Baby-Jubjub + gnark/PLONK) is a second
+independent Golden NIDKG implementation.  Cross-checking the two surfaces a
+few protocol-level observations and confirms that some of the issues above
+are not specific to one implementation; see `COMPARISON.md` for the full
+side-by-side and performance comparison.
+
+* **fy's Schnorr PoK (`pki.go`) does not bind the registrant `NodeID`.**  The
+  Fiat–Shamir challenge is `H("golden-pki-pok" ‖ sid ‖ PK ‖ R)` — no `id` —
+  and the package does not reject duplicate public keys.  This makes it
+  vulnerable to the *same-session* key-duplication share-recovery attack from
+  §1 unless the caller's PKI rejects duplicate keys independently.  This
+  reinforces that §1 deserves an explicit fix in the paper.
+* **fy proves `R = g_out^r` in-circuit** with emulated BN254 G1 arithmetic
+  (`sw_emulated`) — i.e. the paper's Appendix E alternative, not the main
+  construction's commitment-linking trick — and the circuit balloons from
+  the paper's `≈14λ ≈ 3.6 k` to `≈238 k` constraints.  This is what §7 above
+  warns implementers about.
+* **fy uses `pad = x₁ + α·x₂`** with `α` derived from the session ID, while
+  the paper (and this implementation) use `r = β·r₁ + r₂` with `β` a CRS
+  constant.  Both are valid universal-hash extractors, but they are not
+  interchangeable.  See `COMPARISON.md` §F2/§F3.
+* **Whether fy's gnark circuit constrains a canonical `int(S.x)`
+  decomposition is not visible** from the `golden` package.  If gnark's
+  `twistededwards.ScalarMul` decomposes its scalar with `api.ToBinary(s, 254)`
+  and no `< r` check, fy has the same gap fixed here in §10.
+
+---
+
 ## Open questions (could not resolve without the PDF)
 
 * Exactly how `β` is sampled (CRS? hashed? per-session?).  This implementation

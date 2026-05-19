@@ -43,6 +43,16 @@ impl Polynomial {
         Self { coeffs }
     }
 
+    /// Build a polynomial from explicit coefficients `[a_0, a_1, …]`.
+    /// Used for deterministic test vectors.
+    pub fn from_coeffs(coeffs: Vec<Fp>) -> Self {
+        assert!(
+            !coeffs.is_empty(),
+            "polynomial must have at least one coefficient"
+        );
+        Self { coeffs }
+    }
+
     /// Evaluate `f(z)`.
     pub fn evaluate(&self, z: Fp) -> Fp {
         // Horner.

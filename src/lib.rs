@@ -1,7 +1,7 @@
 //! Reference implementation of **Golden: Lightweight Non-Interactive
 //! Distributed Key Generation** (Bünz, Choi, Komlo — ePrint 2025/1924).
 //!
-//! See [`CLAUDE.md`] for a protocol overview, [`BUGS.md`] for a list of
+//! See `CLAUDE.md` for a protocol overview, `BUGS.md` for a list of
 //! issues found while reading the paper, and `examples/demo.rs` for a
 //! runnable end-to-end DKG.
 //!

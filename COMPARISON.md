@@ -61,10 +61,10 @@ download cost is excluded).
 | eVRF pad derivation              | 0.55 ms      | 0.80 ms      | 1.5× faster |
 | ZK setup (one-time)              | 1.3 s        | 11.4 s       | 8.7× faster |
 | eVRF prove (1 peer)              | 2.9 s        | 7.9 s        | 2.7× faster |
-| eVRF verify (1 peer)             | 121 ms       | 3.0 ms       | **40× slower** |
+| eVRF verify (1 peer)             | 119 ms       | 3.0 ms       | **40× slower** |
 | Round 0 (n=3, 3 dealers)         | 9.0 s        | 49.8 s       | 5.5× faster |
-| Verify 3 dealings (one-by-one)   | 433 ms       | 18 ms        | **24× slower** |
-| Verify 3 dealings (batched MSM)  | 136 ms       | —            | **7.5× slower** |
+| Verify 3 dealings (one-by-one)   | 426 ms       | 18 ms        | **24× slower** |
+| Verify 3 dealings (batched MSM)  | 118 ms       | —            | **6.6× slower** |
 | Proof size (1 peer)              | ≈ 1.8 kB     | 584 B        | 3.1× larger |
 
 Take-aways:
@@ -86,7 +86,7 @@ Mitigations applied:
    `verify_dealings()` collects each dealing's verification coefficients in
    parallel, takes a Fiat-Shamir-derived random linear combination, and runs
    **one** MSM over the shared `G[0..n]/H[0..n]` generators plus a small
-   per-proof tail.  Implemented (`bp_r1cs::verify_batch`); ~3.2× faster at
+   per-proof tail.  Implemented (`bp_r1cs::verify_batch`); ~3.6× faster at
    `n=3` and the savings grow with `n` because the shared-generator MSM is
    amortised across dealers.
 2. *Parallel circuit reconstruction across dealings, parallel MSM and IPA

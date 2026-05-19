@@ -126,7 +126,10 @@ pub fn create_dealing(
         return Err(GoldenError::PartyNotInPki { id: me.id });
     }
     let omega = omega.unwrap_or_else(|| Fp::rand(rng));
+    // `Polynomial` zeroizes its coefficients on drop; wrap `shares` so the
+    // evaluated points are scrubbed too rather than left in freed heap memory.
     let (poly, shares) = shamir::share(omega, cfg.n, cfg.t, rng);
+    let shares = zeroize::Zeroizing::new(shares);
     let commitment = vss::commit(&poly);
     let mut msg = [0u8; 32];
     rng.fill(&mut msg);
@@ -135,7 +138,7 @@ pub fn create_dealing(
     let mut peers = Vec::new();
     let mut wits = Vec::new();
     let mut own_share = None;
-    for (j, x_ij) in &shares {
+    for (j, x_ij) in shares.iter() {
         if *j == me.id {
             own_share = Some(*x_ij);
             continue;

@@ -81,9 +81,9 @@ round-trip and rejects a tampered `R`.
 | Operation              | n=3, t=2 | n=5, t=4 | Notes |
 |------------------------|----------|----------|-------|
 | ZK CRS setup           | ~1.3 s   | ~3 s     | Hash-to-G1 for `2·gens` generators; one-time per `n`. |
-| Dealing (Round 0)      | ~3.1 s   | ~8.4 s   | One batched eVRF proof per dealer. |
-| Verify one dealing     | ~145 ms  | ~250 ms  | Circuit reconstruction + single MSM. |
-| Verify all `n` (batch) | ~45 ms/d | ~56 ms/d | `verify_dealings` — parallel circuit builds + one MSM, §5.3. |
+| Dealing (Round 0)      | ~3.0 s   | ~8.4 s   | One batched eVRF proof per dealer. |
+| Verify one dealing     | ~140 ms  | ~250 ms  | Circuit reconstruction + single MSM. |
+| Verify all `n` (batch) | ~40 ms/d | ~56 ms/d | `verify_dealings` — parallel circuit builds + one MSM, §5.3. |
 | Round 1                | <1 ms    | <1 ms    | |
 
 The implementation uses the *batched* protocol from §5.3 of the paper:
